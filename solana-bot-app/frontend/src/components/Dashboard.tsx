@@ -91,6 +91,38 @@ export function Dashboard() {
 
   const backendBaseUrl = useMemo(() => getBackendBaseUrl(), []);
 
+  const copyLogs = useCallback(async () => {
+    try {
+      const text =
+        logs.length === 0
+          ? "(no logs)"
+          : logs
+              .map((l) => `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} ${l.msg}`)
+              .join("\n");
+
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+      } else {
+        // Fallback for older browsers/webviews
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        ta.style.top = "-9999px";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        const ok = document.execCommand("copy");
+        document.body.removeChild(ta);
+        if (!ok) throw new Error("Copy command failed");
+      }
+
+      toast.success("Logs copied to clipboard");
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to copy logs");
+    }
+  }, [logs]);
+
   const configPayload = useMemo(
     () => ({
       cluster,
@@ -582,7 +614,17 @@ export function Dashboard() {
           </section>
 
           <section className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
-            <div className="text-lg font-semibold">Live logs</div>
+            <div className="flex items-center justify-between">
+              <div className="text-lg font-semibold">Live logs</div>
+              <button
+                className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-200 disabled:opacity-60"
+                onClick={copyLogs}
+                disabled={loading}
+                type="button"
+              >
+                Copy logs
+              </button>
+            </div>
             <div
               ref={logBoxRef}
               className="mt-3 h-[340px] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed"
