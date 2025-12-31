@@ -1,0 +1,16 @@
+{
+  "name": "solana-bot-app",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev:frontend": "npm -w frontend run dev",
+    "dev:backend": "npm -w backend run dev",
+    "build:frontend": "npm -w frontend run build",
+    "typecheck:backend": "npm -w backend run typecheck"
+  }
+}
+
