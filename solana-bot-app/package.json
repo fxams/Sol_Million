@@ -6,6 +6,10 @@
     "frontend",
     "backend"
   ],
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
   "scripts": {
     "dev:frontend": "npm -w frontend run dev",
     "dev:backend": "npm -w backend run dev",
