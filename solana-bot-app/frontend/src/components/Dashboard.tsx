@@ -224,7 +224,6 @@ export function Dashboard() {
       const signed: VersionedTransaction[] = [];
       for (const tx of unsigned) {
         // Ensure payer is the connected wallet (backend sets this, but we validate UX-side)
-        // @ts-expect-error: wallet adapter types vary per wallet
         const signedTx = await wallet.signTransaction(tx);
         signed.push(signedTx);
       }
@@ -291,7 +290,6 @@ export function Dashboard() {
       if (!res.ok) throw new Error(data?.error ?? `prepare-buy failed (${res.status})`);
 
       const tx = VersionedTransaction.deserialize(Buffer.from(data.unsignedTxBase64, "base64"));
-      // @ts-expect-error: wallet adapter types vary per wallet
       const signed = await wallet.signTransaction(tx);
       const sig = await connection.sendRawTransaction(signed.serialize(), {
         skipPreflight: false,
