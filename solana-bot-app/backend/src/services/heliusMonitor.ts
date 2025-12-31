@@ -34,6 +34,54 @@ function looksLikePumpfunTradeSignal(logs: string[]) {
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 
+function getStaticAccountKeysFromTx(tx: any): PublicKey[] {
+  // web3.js v1 can throw if you call message.getAccountKeys() on v0 messages without lookups resolved.
+  // We only need static keys for payer + light heuristics.
+  const msg = tx?.transaction?.message;
+  if (!msg) return [];
+  if (Array.isArray(msg.staticAccountKeys)) return msg.staticAccountKeys as PublicKey[];
+  if (Array.isArray(msg.accountKeys)) return msg.accountKeys as PublicKey[];
+  return [];
+}
+
+async function withRetries<T>(fn: () => Promise<T>, opts?: { attempts?: number; baseDelayMs?: number }): Promise<T> {
+  const attempts = opts?.attempts ?? 3;
+  const baseDelayMs = opts?.baseDelayMs ?? 250;
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      // Backoff
+      const delay = baseDelayMs * Math.pow(2, i);
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  throw lastErr;
+}
+
+// Limit concurrent RPC calls (Render/Node can hit socket exhaustion otherwise).
+const rpcInFlight: Record<string, number> = {};
+const rpcQueues: Record<string, Array<() => void>> = {};
+async function withRpcLimit<T>(cluster: Cluster, fn: () => Promise<T>, limit = 2): Promise<T> {
+  const key = cluster;
+  rpcInFlight[key] = rpcInFlight[key] ?? 0;
+  rpcQueues[key] = rpcQueues[key] ?? [];
+
+  if (rpcInFlight[key] >= limit) {
+    await new Promise<void>((resolve) => rpcQueues[key].push(resolve));
+  }
+  rpcInFlight[key] += 1;
+  try {
+    return await fn();
+  } finally {
+    rpcInFlight[key] -= 1;
+    const next = rpcQueues[key].shift();
+    if (next) next();
+  }
+}
+
 function u32le(buf: Buffer, off: number) {
   return buf.readUInt32LE(off);
 }
@@ -56,10 +104,19 @@ function parseMintAccount(data: Buffer) {
 
 async function inferMintFromPumpfunTx(opts: { cluster: Cluster; signature: string }) {
   const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
-  const tx = await connection.getTransaction(opts.signature, {
-    commitment: "confirmed",
-    maxSupportedTransactionVersion: 0
-  });
+  const tx = await withRpcLimit(
+    opts.cluster,
+    async () =>
+      await withRetries(
+        async () =>
+          await connection.getTransaction(opts.signature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0
+          }),
+        { attempts: 3, baseDelayMs: 200 }
+      ),
+    2
+  );
   if (!tx) return null;
 
   // Prefer token balance mints (cheap and usually correct for buys/sells)
@@ -73,10 +130,18 @@ async function inferMintFromPumpfunTx(opts: { cluster: Cluster; signature: strin
   }
 
   // Fallback: probe a few account keys for a mint-like account
-  const keys = tx.transaction.message.getAccountKeys().staticAccountKeys;
+  const keys = getStaticAccountKeysFromTx(tx);
   const probe = keys.slice(0, 25);
   for (const k of probe) {
-    const info = await connection.getAccountInfo(k, "confirmed");
+    const info = await withRpcLimit(
+      opts.cluster,
+      async () =>
+        await withRetries(async () => await connection.getAccountInfo(k, "confirmed"), {
+          attempts: 3,
+          baseDelayMs: 200
+        }),
+      2
+    );
     if (!info) continue;
     if (!info.owner.equals(TOKEN_PROGRAM_ID) && !info.owner.equals(TOKEN_2022_PROGRAM_ID)) continue;
     const parsed = parseMintAccount(Buffer.from(info.data));
@@ -94,7 +159,15 @@ async function checkMintSafety(opts: {
 }): Promise<{ ok: boolean; reason?: string; top1Pct?: number; top10Pct?: number }> {
   const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
   const mintPk = new PublicKey(opts.mint);
-  const acc = await connection.getAccountInfo(mintPk, "confirmed");
+  const acc = await withRpcLimit(
+    opts.cluster,
+    async () =>
+      await withRetries(async () => await connection.getAccountInfo(mintPk, "confirmed"), {
+        attempts: 3,
+        baseDelayMs: 200
+      }),
+    2
+  );
   if (!acc) return { ok: false, reason: "mint account not found" };
 
   const is2022 = acc.owner.equals(TOKEN_2022_PROGRAM_ID);
@@ -112,11 +185,27 @@ async function checkMintSafety(opts: {
   }
 
   // Holder concentration checks (best-effort, can fail early at launch)
-  const supplyResp = await connection.getTokenSupply(mintPk, "confirmed");
+  const supplyResp = await withRpcLimit(
+    opts.cluster,
+    async () =>
+      await withRetries(async () => await connection.getTokenSupply(mintPk, "confirmed"), {
+        attempts: 3,
+        baseDelayMs: 200
+      }),
+    2
+  );
   const supply = BigInt(supplyResp.value.amount);
   if (supply === 0n) return { ok: false, reason: "zero supply" };
 
-  const largest = await connection.getTokenLargestAccounts(mintPk, "confirmed");
+  const largest = await withRpcLimit(
+    opts.cluster,
+    async () =>
+      await withRetries(async () => await connection.getTokenLargestAccounts(mintPk, "confirmed"), {
+        attempts: 3,
+        baseDelayMs: 200
+      }),
+    2
+  );
   const amounts = largest.value.map((a) => BigInt(a.amount));
   const top1 = amounts[0] ?? 0n;
   const top10 = amounts.slice(0, 10).reduce((s, x) => s + x, 0n);
@@ -137,11 +226,20 @@ async function txMentionsAnyOfMints(opts: {
 }): Promise<string[]> {
   if (opts.mintSet.size === 0) return [];
   const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
-  const tx = await connection.getTransaction(opts.signature, {
-    commitment: "confirmed",
-    maxSupportedTransactionVersion: 0
-  });
-  const keys = tx?.transaction.message.getAccountKeys().staticAccountKeys ?? [];
+  const tx = await withRpcLimit(
+    opts.cluster,
+    async () =>
+      await withRetries(
+        async () =>
+          await connection.getTransaction(opts.signature, {
+            commitment: "confirmed",
+            maxSupportedTransactionVersion: 0
+          }),
+        { attempts: 3, baseDelayMs: 200 }
+      ),
+    2
+  );
+  const keys = getStaticAccountKeysFromTx(tx) ?? [];
   const matches: string[] = [];
   for (const k of keys) {
     const b58 = k.toBase58();
@@ -276,7 +374,7 @@ export async function ensureClusterSubscription(cluster: Cluster) {
           }
 
           st.count += 1;
-          const payer = tx.transaction.message.getAccountKeys().staticAccountKeys[0]?.toBase58();
+        const payer = getStaticAccountKeysFromTx(tx)[0]?.toBase58();
           if (payer) st.payers.add(payer);
 
           // Run safety check once per mint per session window
