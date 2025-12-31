@@ -72,11 +72,14 @@ router.get("/status", async (req, res) => {
       ok: true,
       running: false,
       cluster,
+      // Back-compat field (frontend now prefers clusterLogs/sessionLogs).
       logs: runtime.clusterLogs,
+      clusterLogs: runtime.clusterLogs,
+      sessionLogs: [],
       bundles: [],
       pendingAction: null,
       sessions,
-      clusterLogs: runtime.clusterLogs
+      owner: null
     });
   }
 
@@ -103,7 +106,10 @@ router.get("/status", async (req, res) => {
     running: session.running,
     cluster,
     owner,
+    // Back-compat field (frontend now prefers clusterLogs/sessionLogs).
     logs,
+    clusterLogs: runtime.clusterLogs,
+    sessionLogs: session.logs,
     bundles,
     pendingAction: session.pendingAction,
     sessions

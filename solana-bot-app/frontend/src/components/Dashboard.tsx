@@ -34,8 +34,11 @@ type BotStatus = {
   ok: boolean;
   running: boolean;
   cluster: "mainnet-beta" | "devnet";
-  owner?: string;
-  logs: { ts: number; level: "info" | "warn" | "error"; msg: string }[];
+  owner?: string | null;
+  // Back-compat (older backend). New backend returns clusterLogs + sessionLogs.
+  logs?: { ts: number; level: "info" | "warn" | "error"; msg: string }[];
+  clusterLogs?: { ts: number; level: "info" | "warn" | "error"; msg: string }[];
+  sessionLogs?: { ts: number; level: "info" | "warn" | "error"; msg: string }[];
   bundles: BundleStatus[];
   pendingAction: PendingAction;
   sessions?: {
@@ -82,7 +85,8 @@ export function Dashboard() {
   const [autoSellDelaySec, setAutoSellDelaySec] = useState("10");
   const [snipeList, setSnipeList] = useState("");
 
-  const [logs, setLogs] = useState<BotStatus["logs"]>([]);
+  const [clusterLogs, setClusterLogs] = useState<NonNullable<BotStatus["clusterLogs"]>>([]);
+  const [sessionLogs, setSessionLogs] = useState<NonNullable<BotStatus["sessionLogs"]>>([]);
   const [bundles, setBundles] = useState<BundleStatus[]>([]);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [sessions, setSessions] = useState<BotStatus["sessions"]>([]);
@@ -91,12 +95,18 @@ export function Dashboard() {
 
   const backendBaseUrl = useMemo(() => getBackendBaseUrl(), []);
 
+  const displayLogs = useMemo(() => {
+    const merged = [...(clusterLogs ?? []), ...(sessionLogs ?? [])];
+    merged.sort((a, b) => a.ts - b.ts);
+    return merged;
+  }, [clusterLogs, sessionLogs]);
+
   const copyLogs = useCallback(async () => {
     try {
       const text =
-        logs.length === 0
+        displayLogs.length === 0
           ? "(no logs)"
-          : logs
+          : displayLogs
               .map((l) => `[${new Date(l.ts).toISOString()}] ${l.level.toUpperCase()} ${l.msg}`)
               .join("\n");
 
@@ -121,7 +131,7 @@ export function Dashboard() {
     } catch (e: any) {
       toast.error(e?.message ?? "Failed to copy logs");
     }
-  }, [logs]);
+  }, [displayLogs]);
 
   const configPayload = useMemo(
     () => ({
@@ -168,9 +178,12 @@ export function Dashboard() {
       setRunning(data.running);
       setBundles(data.bundles ?? []);
       setPendingAction(data.pendingAction ?? null);
+      // Only update session logs when we have an owner; otherwise keep the last session logs.
+      if (data.sessionLogs) setSessionLogs(data.sessionLogs);
     }
-    // Logs can always be updated (backend returns cluster logs even without owner).
-    if (data.logs) setLogs(data.logs);
+    // Cluster logs can always be updated.
+    if (data.clusterLogs) setClusterLogs(data.clusterLogs);
+    else if (data.logs) setClusterLogs(data.logs);
     setSessions(data.sessions ?? []);
   }, [backendBaseUrl, cluster, wallet.publicKey]);
 
@@ -196,7 +209,7 @@ export function Dashboard() {
     const el = logBoxRef.current;
     if (!el) return;
     el.scrollTop = el.scrollHeight;
-  }, [logs]);
+  }, [displayLogs]);
 
   const startBot = useCallback(async () => {
     if (!wallet.publicKey) {
@@ -629,10 +642,10 @@ export function Dashboard() {
               ref={logBoxRef}
               className="mt-3 h-[340px] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed"
             >
-              {logs.length === 0 ? (
+              {displayLogs.length === 0 ? (
                 <div className="text-slate-500">No logs yet.</div>
               ) : (
-                logs.map((l, idx) => (
+                displayLogs.map((l, idx) => (
                   <div key={`${l.ts}-${idx}`} className="whitespace-pre-wrap">
                     <span className="text-slate-500">
                       {new Date(l.ts).toLocaleTimeString()}{" "}
