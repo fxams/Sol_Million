@@ -83,26 +83,27 @@ async function withRpcLimit<T>(cluster: Cluster, fn: () => Promise<T>, limit = 2
 }
 
 async function getTransactionFast(connection: Connection, cluster: Cluster, signature: string) {
-  // For sniping we want "fresh" txs. Prefer processed, then fall back to confirmed.
-  const attempt = async (commitment: "processed" | "confirmed") =>
+  // web3.js getTransaction() accepts Finality (confirmed/finalized), not "processed".
+  // For freshness, we just retry confirmed a few times.
+  const attempt = async (commitment: "confirmed" | "finalized") =>
     await connection.getTransaction(signature, {
       commitment,
       maxSupportedTransactionVersion: 0
     });
 
-  const txProcessed = await withRpcLimit(
-    cluster,
-    async () => await withRetries(async () => await attempt("processed"), { attempts: 2, baseDelayMs: 120 }),
-    2
-  );
-  if (txProcessed) return txProcessed;
-
   const txConfirmed = await withRpcLimit(
     cluster,
-    async () => await withRetries(async () => await attempt("confirmed"), { attempts: 2, baseDelayMs: 200 }),
+    async () => await withRetries(async () => await attempt("confirmed"), { attempts: 3, baseDelayMs: 200 }),
     2
   );
-  return txConfirmed;
+  if (txConfirmed) return txConfirmed;
+
+  const txFinalized = await withRpcLimit(
+    cluster,
+    async () => await withRetries(async () => await attempt("finalized"), { attempts: 2, baseDelayMs: 250 }),
+    2
+  );
+  return txFinalized;
 }
 
 function u32le(buf: Buffer, off: number) {
@@ -334,6 +335,8 @@ export async function ensureClusterSubscription(cluster: Cluster) {
     for (const s of runtime.sessions.values()) {
       if (!s.running || !s.config) continue;
       if (s.pendingAction) continue; // one-at-a-time per wallet
+      const cfg = s.config;
+      const epoch = s.epoch;
 
       // Rate-limited “heartbeat” so the UI doesn't feel stuck.
       try {
@@ -361,19 +364,19 @@ export async function ensureClusterSubscription(cluster: Cluster) {
       // Route signals based on selected Pump.fun phase.
       // - For "pre" we react to Pump.fun signals
       // - For "post" we react to Raydium signals
-      if (s.config.mode === "snipe") {
-        if (s.config.pumpFunPhase === "pre" && sourceKey !== "pumpfun") continue;
-        if (s.config.pumpFunPhase === "post" && sourceKey !== "raydium") continue;
+      if (cfg.mode === "snipe") {
+        if (cfg.pumpFunPhase === "pre" && sourceKey !== "pumpfun") continue;
+        if (cfg.pumpFunPhase === "post" && sourceKey !== "raydium") continue;
       } else {
         // volume/arb: keep Raydium-only in this template
         if (sourceKey !== "raydium") continue;
       }
 
       // If a snipe list is provided, only trigger on matching mints.
-      const snipeSet = new Set((s.config.snipeList ?? []).map((x) => x.trim()).filter(Boolean));
+      const snipeSet = new Set((cfg.snipeList ?? []).map((x) => x.trim()).filter(Boolean));
 
       // Best default sniping mode: "auto" on Pump.fun pre-migration, with strong safety filters.
-      if (s.config.mode === "snipe" && s.config.pumpFunPhase === "pre" && sourceKey === "pumpfun" && s.config.snipeTargetMode === "auto") {
+      if (cfg.mode === "snipe" && cfg.pumpFunPhase === "pre" && sourceKey === "pumpfun" && cfg.snipeTargetMode === "auto") {
         const stats: any = ((s as any)._autoSnipeStats ??= {
           totalSignals: 0,
           txOk: 0,
@@ -386,6 +389,7 @@ export async function ensureClusterSubscription(cluster: Cluster) {
 
         try {
           const inferred = await inferMintFromPumpfunTx({ cluster, signature });
+          if (!s.running || s.config !== cfg || s.epoch !== epoch) continue;
           const mint = inferred?.mint;
           const tx = inferred?.tx;
           if (!mint || !tx) {
@@ -398,7 +402,7 @@ export async function ensureClusterSubscription(cluster: Cluster) {
           const now = Date.now();
           const bt = tx.blockTime ? tx.blockTime * 1000 : now;
           const ageSec = Math.floor((now - bt) / 1000);
-          if (ageSec > s.config.autoSnipe.maxTxAgeSec) {
+          if (ageSec > cfg.autoSnipe.maxTxAgeSec) {
             stats.rejects.tooOld = (stats.rejects.tooOld ?? 0) + 1;
             continue;
           }
@@ -408,17 +412,18 @@ export async function ensureClusterSubscription(cluster: Cluster) {
           (s as any)._autoMintStats = mintStats;
 
           let st = mintStats.get(mint);
-          if (!st || now - st.firstSeenMs > s.config.autoSnipe.windowSec * 1000) {
+          if (!st || now - st.firstSeenMs > cfg.autoSnipe.windowSec * 1000) {
             st = { firstSeenMs: now, count: 0, payers: new Set<string>(), safety: null };
             mintStats.set(mint, st);
           }
 
           st.count += 1;
-        const payer = getStaticAccountKeysFromTx(tx)[0]?.toBase58();
+          const payer = getStaticAccountKeysFromTx(tx)[0]?.toBase58();
           if (payer) st.payers.add(payer);
 
           // Run safety check once per mint per session window
-          if (!st.safety) st.safety = await checkMintSafety({ cluster, mint, cfg: s.config.autoSnipe });
+          if (!st.safety) st.safety = await checkMintSafety({ cluster, mint, cfg: cfg.autoSnipe });
+          if (!s.running || s.config !== cfg || s.epoch !== epoch) continue;
           if (!st.safety.ok) {
             const r = String(st.safety.reason ?? "safety");
             stats.rejects[r] = (stats.rejects[r] ?? 0) + 1;
@@ -426,11 +431,11 @@ export async function ensureClusterSubscription(cluster: Cluster) {
           }
           stats.safetyOk += 1;
 
-          if (st.count < s.config.autoSnipe.minSignalsInWindow) {
+          if (st.count < cfg.autoSnipe.minSignalsInWindow) {
             stats.rejects.momentum = (stats.rejects.momentum ?? 0) + 1;
             continue;
           }
-          if (st.payers.size < s.config.autoSnipe.minUniqueFeePayersInWindow) {
+          if (st.payers.size < cfg.autoSnipe.minUniqueFeePayersInWindow) {
             stats.rejects.uniquePayers = (stats.rejects.uniquePayers ?? 0) + 1;
             continue;
           }
@@ -441,7 +446,7 @@ export async function ensureClusterSubscription(cluster: Cluster) {
           pushSessionLog(cluster, s.owner, "warn", `Auto-snipe check failed: ${e?.message ?? String(e)}`);
           continue;
         }
-      } else if (s.config.mode === "snipe" && s.config.snipeTargetMode === "list") {
+      } else if (cfg.mode === "snipe" && cfg.snipeTargetMode === "list") {
         // List-based sniping: must specify a mint list.
         if (snipeSet.size === 0) {
           const lastWarn = (s as any)._lastEmptySnipeWarnMs as number | undefined;
@@ -454,6 +459,7 @@ export async function ensureClusterSubscription(cluster: Cluster) {
         }
         try {
           const matches = await txMentionsAnyOfMints({ cluster, signature, mintSet: snipeSet });
+          if (!s.running || s.config !== cfg || s.epoch !== epoch) continue;
           if (matches.length === 0) continue;
           (s as any)._matchedMints = matches;
         } catch (e: any) {
@@ -465,11 +471,12 @@ export async function ensureClusterSubscription(cluster: Cluster) {
       // Only log cluster-level signals when they matter to at least one session.
       pushClusterLog(cluster, "info", `${sourceKey} matched. sig=${signature}`);
 
+      if (!s.running || s.config !== cfg || s.epoch !== epoch) continue;
       s.pendingAction = {
         type: "SIGN_AND_BUNDLE",
         reason:
-          s.config.mode === "snipe"
-            ? `[snipe/${s.config.pumpFunPhase}] Target detected (${signature}). Click "Sign & submit pending bundle".`
+          cfg.mode === "snipe"
+            ? `[snipe/${cfg.pumpFunPhase}] Target detected (${signature}). Click "Sign & submit pending bundle".`
             : `[volume] Signal detected (${signature}). Click "Sign & submit pending bundle".`,
         unsignedTxsBase64: []
       };
@@ -501,6 +508,7 @@ export async function startWalletSession(owner: string, config: BotConfig) {
   session.running = true;
   session.config = config;
   session.pendingAction = null;
+  session.epoch += 1;
 
   pushSessionLog(cluster, owner, "info", `Session started. mode=${config.mode} mev=${config.mevEnabled}`);
   await ensureClusterSubscription(cluster);
@@ -511,6 +519,7 @@ export async function stopWalletSession(cluster: Cluster, owner: string) {
   session.running = false;
   session.config = null;
   session.pendingAction = null;
+  session.epoch += 1;
   pushSessionLog(cluster, owner, "info", "Session stopped");
 
   // If nobody is running, close WS to reduce resource usage.

@@ -86,6 +86,8 @@ export type WalletSession = {
   owner: string; // base58 pubkey (never a private key)
   running: boolean;
   config: BotConfig | null;
+  /** Incremented on start/stop to invalidate in-flight async work. */
+  epoch: number;
   logs: LogLine[];
   bundles: Map<string, BundleStatus>;
   preparedBundles: Map<string, PreparedBundle>;
@@ -109,6 +111,7 @@ function makeSession(owner: string): WalletSession {
     owner,
     running: false,
     config: null,
+    epoch: 0,
     logs: [],
     bundles: new Map(),
     preparedBundles: new Map(),
