@@ -33,9 +33,11 @@ type BotStatus = {
   ok: boolean;
   running: boolean;
   cluster: "mainnet-beta" | "devnet";
+  owner?: string;
   logs: { ts: number; level: "info" | "warn" | "error"; msg: string }[];
   bundles: BundleStatus[];
   pendingAction: PendingAction;
+  sessions?: { owner: string; running: boolean; mode: BotMode | null; mevEnabled: boolean | null }[];
 };
 
 function getBackendBaseUrl() {
@@ -75,6 +77,7 @@ export function Dashboard() {
   const [logs, setLogs] = useState<BotStatus["logs"]>([]);
   const [bundles, setBundles] = useState<BundleStatus[]>([]);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
+  const [sessions, setSessions] = useState<BotStatus["sessions"]>([]);
 
   const logBoxRef = useRef<HTMLDivElement | null>(null);
 
@@ -120,6 +123,7 @@ export function Dashboard() {
     setLogs(data.logs ?? []);
     setBundles(data.bundles ?? []);
     setPendingAction(data.pendingAction ?? null);
+    setSessions(data.sessions ?? []);
   }, [backendBaseUrl, cluster, wallet.publicKey]);
 
   useEffect(() => {
@@ -147,12 +151,16 @@ export function Dashboard() {
   }, [logs]);
 
   const startBot = useCallback(async () => {
+    if (!wallet.publicKey) {
+      toast.error("Connect a wallet first");
+      return;
+    }
     setLoading(true);
     try {
       const res = await fetch(`${backendBaseUrl}/api/start-monitoring`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(configPayload)
+        body: JSON.stringify({ ...configPayload, owner: wallet.publicKey.toBase58() })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error ?? `start failed (${res.status})`);
@@ -163,15 +171,19 @@ export function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [backendBaseUrl, configPayload, fetchStatus]);
+  }, [backendBaseUrl, configPayload, fetchStatus, wallet.publicKey]);
 
   const stopBot = useCallback(async () => {
+    if (!wallet.publicKey) {
+      toast.error("Connect a wallet first");
+      return;
+    }
     setLoading(true);
     try {
       const res = await fetch(`${backendBaseUrl}/api/stop-monitoring`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ cluster })
+        body: JSON.stringify({ cluster, owner: wallet.publicKey.toBase58() })
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.error ?? `stop failed (${res.status})`);
@@ -182,7 +194,7 @@ export function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [backendBaseUrl, cluster, fetchStatus]);
+  }, [backendBaseUrl, cluster, fetchStatus, wallet.publicKey]);
 
   const signAndSubmitPendingBundle = useCallback(async () => {
     if (!pendingAction) return;
@@ -225,6 +237,7 @@ export function Dashboard() {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           cluster,
+          owner: wallet.publicKey.toBase58(),
           signedTxsBase64
         })
       });
@@ -238,7 +251,7 @@ export function Dashboard() {
       const subRes = await fetch(`${backendBaseUrl}/api/submit-bundle`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ cluster, bundleId })
+        body: JSON.stringify({ cluster, owner: wallet.publicKey.toBase58(), bundleId })
       });
       const subData = await subRes.json().catch(() => ({}));
       if (!subRes.ok) throw new Error(subData?.error ?? `submit failed (${subRes.status})`);
@@ -493,6 +506,50 @@ export function Dashboard() {
                 </div>
               </div>
             )}
+
+            <div className="mt-5">
+              <div className="text-sm font-semibold text-slate-200">Backend wallet sessions</div>
+              <div className="mt-2 rounded-lg border border-slate-800 bg-slate-950">
+                <div className="max-h-[160px] overflow-auto">
+                  {(sessions ?? []).length === 0 ? (
+                    <div className="px-3 py-3 text-xs text-slate-500">No active sessions.</div>
+                  ) : (
+                    <table className="min-w-full text-left text-xs">
+                      <thead className="border-b border-slate-800 text-slate-400">
+                        <tr>
+                          <th className="px-3 py-2">Owner</th>
+                          <th className="px-3 py-2">Mode</th>
+                          <th className="px-3 py-2">MEV</th>
+                          <th className="px-3 py-2">Running</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {(sessions ?? []).map((s) => {
+                          const isMe = wallet.publicKey?.toBase58() === s.owner;
+                          return (
+                            <tr key={s.owner} className="border-b border-slate-900">
+                              <td className="px-3 py-2 font-mono text-[11px] text-slate-200">
+                                {isMe ? <span className="text-emerald-300">● </span> : null}
+                                {s.owner}
+                              </td>
+                              <td className="px-3 py-2 text-slate-200">{s.mode ?? "-"}</td>
+                              <td className="px-3 py-2 text-slate-200">
+                                {s.mevEnabled == null ? "-" : s.mevEnabled ? "on" : "off"}
+                              </td>
+                              <td className="px-3 py-2 text-slate-200">{s.running ? "yes" : "no"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              </div>
+              <div className="mt-2 text-xs text-slate-400">
+                To run sniper + volume with different wallets, open this app in two browser profiles and connect a
+                different wallet in each.
+              </div>
+            </div>
           </section>
 
           <section className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">

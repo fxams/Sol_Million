@@ -124,6 +124,27 @@ Open `http://localhost:3000`.
 
 ---
 
+## Multiple wallets (sniper wallet + volume wallet)
+
+This project supports **multiple wallet sessions in the backend** (by public key). Each wallet session keeps its own:
+
+- bot config (mode, MEV toggle, amounts)
+- logs
+- pending actions (signing prompts)
+- bundle history
+
+Because private keys never leave the wallet extension, **signing can only happen in the browser session where that
+wallet is connected**.
+
+Recommended workflow:
+
+1. Open the frontend in **two separate browser profiles** (or two different browsers).
+2. Connect **Wallet A** and start it in **Snipe** mode.
+3. Connect **Wallet B** and start it in **Volume/Arb** mode.
+4. Each tab will receive its own pending actions and will sign with its connected wallet.
+
+---
+
 ## Devnet vs Mainnet
 
 - **Devnet**: use it to validate your UI flows and wallet signing.

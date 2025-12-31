@@ -3,8 +3,12 @@ import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import { VersionedTransaction, SystemProgram } from "@solana/web3.js";
 import bs58 from "bs58";
-import { pushLog, state } from "../state/store.js";
-import { startMonitoring, stopMonitoring, materializePendingUnsignedTxs } from "../services/heliusMonitor.js";
+import { getOrCreateSession, pushClusterLog, pushSessionLog, state } from "../state/store.js";
+import {
+  materializePendingUnsignedTxsForSession,
+  startWalletSession,
+  stopWalletSession
+} from "../services/heliusMonitor.js";
 import { buildUnsignedBuyLikeTxBase64, buildUnsignedSellLikeTxBase64 } from "../services/txBuilder.js";
 import { base64ToBytes, bytesToBase58 } from "../utils/encoding.js";
 import { jito } from "../services/jito.js";
@@ -12,6 +16,7 @@ import { jito } from "../services/jito.js";
 const router = Router();
 
 const clusterSchema = z.enum(["mainnet-beta", "devnet"]);
+const ownerSchema = z.string().min(32).max(64);
 
 const configSchema = z.object({
   cluster: clusterSchema.default("mainnet-beta"),
@@ -26,53 +31,69 @@ const configSchema = z.object({
 });
 
 router.post("/start-monitoring", async (req, res) => {
-  const parsed = configSchema.safeParse(req.body ?? {});
+  const parsed = configSchema.extend({ owner: ownerSchema }).safeParse(req.body ?? {});
   if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-  const config = parsed.data;
+  const { owner, ...config } = parsed.data;
 
-  pushLog(config.cluster, "info", `Start requested. mode=${config.mode} mev=${config.mevEnabled}`);
-  await startMonitoring(config);
+  pushSessionLog(config.cluster, owner, "info", `Start requested. mode=${config.mode} mev=${config.mevEnabled}`);
+  await startWalletSession(owner, config);
 
   return res.json({ ok: true });
 });
 
 router.post("/stop-monitoring", async (req, res) => {
-  const parsed = z.object({ cluster: clusterSchema.default("mainnet-beta") }).safeParse(req.body ?? {});
+  const parsed = z
+    .object({ cluster: clusterSchema.default("mainnet-beta"), owner: ownerSchema })
+    .safeParse(req.body ?? {});
   if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-  await stopMonitoring(parsed.data.cluster);
+  await stopWalletSession(parsed.data.cluster, parsed.data.owner);
   return res.json({ ok: true });
 });
 
 router.get("/status", async (req, res) => {
   const cluster = clusterSchema.catch("mainnet-beta").parse(req.query.cluster);
-  const owner = z.string().optional().parse(req.query.owner);
+  const owner = ownerSchema.optional().parse(req.query.owner);
 
   const runtime = state[cluster];
 
-  // If we have a pool-triggered pending action and we now know the owner's pubkey,
-  // materialize unsigned txs (buy + optional tip) to be signed client-side.
-  if (owner && runtime.pendingAction && (runtime.pendingAction as any).needsUnsignedTxs) {
+  const sessions = Array.from(runtime.sessions.values()).map((s) => ({
+    owner: s.owner,
+    running: s.running,
+    mode: s.config?.mode ?? null,
+    mevEnabled: s.config?.mevEnabled ?? null
+  }));
+
+  if (!owner) {
+    return res.json({ ok: true, cluster, sessions, clusterLogs: runtime.clusterLogs });
+  }
+
+  const session = getOrCreateSession(cluster, owner);
+
+  if (session.pendingAction && (session.pendingAction as any).needsUnsignedTxs) {
     try {
-      const unsignedTxsBase64 = await materializePendingUnsignedTxs({ cluster, owner });
-      if (unsignedTxsBase64 && runtime.pendingAction) {
-        runtime.pendingAction.unsignedTxsBase64 = unsignedTxsBase64;
-        delete (runtime.pendingAction as any).needsUnsignedTxs;
+      const unsignedTxsBase64 = await materializePendingUnsignedTxsForSession({ cluster, owner });
+      if (unsignedTxsBase64 && session.pendingAction) {
+        session.pendingAction.unsignedTxsBase64 = unsignedTxsBase64;
+        delete (session.pendingAction as any).needsUnsignedTxs;
       }
     } catch (e: any) {
-      pushLog(cluster, "error", `Failed to build unsigned txs: ${e?.message ?? String(e)}`);
-      runtime.pendingAction = null;
+      pushSessionLog(cluster, owner, "error", `Failed to build unsigned txs: ${e?.message ?? String(e)}`);
+      session.pendingAction = null;
     }
   }
 
-  const bundles = Array.from(runtime.bundles.values()).sort((a, b) => b.createdAtMs - a.createdAtMs);
+  const bundles = Array.from(session.bundles.values()).sort((a, b) => b.createdAtMs - a.createdAtMs);
+  const logs = [...runtime.clusterLogs, ...session.logs].sort((a, b) => a.ts - b.ts);
 
   return res.json({
     ok: true,
-    running: runtime.running,
+    running: session.running,
     cluster,
-    logs: runtime.logs,
+    owner,
+    logs,
     bundles,
-    pendingAction: runtime.pendingAction
+    pendingAction: session.pendingAction,
+    sessions
   });
 });
 
@@ -149,13 +170,14 @@ router.post("/prepare-bundle", async (req, res) => {
   const parsed = z
     .object({
       cluster: clusterSchema.default("mainnet-beta"),
+      owner: ownerSchema,
       signedTxsBase64: z.array(z.string().min(10)).min(1).max(5)
     })
     .safeParse(req.body ?? {});
   if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
 
-  const { cluster, signedTxsBase64 } = parsed.data;
-  const runtime = state[cluster];
+  const { cluster, owner, signedTxsBase64 } = parsed.data;
+  const session = getOrCreateSession(cluster, owner);
 
   if (cluster === "devnet") {
     return res.status(400).json({
@@ -183,7 +205,7 @@ router.post("/prepare-bundle", async (req, res) => {
     // Simulate bundle first to reduce dropped bundles / failures.
     const sim = await jito.simulateBundle(cluster, encodedTransactionsBase58);
 
-    runtime.preparedBundles.set(bundleId, {
+    session.preparedBundles.set(bundleId, {
       bundleId,
       encodedTransactionsBase58,
       createdAtMs: Date.now()
@@ -196,7 +218,7 @@ router.post("/prepare-bundle", async (req, res) => {
       })
       .filter(Boolean) as string[];
 
-    runtime.bundles.set(bundleId, {
+    session.bundles.set(bundleId, {
       bundleId,
       state: "prepared",
       createdAtMs: Date.now(),
@@ -206,12 +228,17 @@ router.post("/prepare-bundle", async (req, res) => {
     });
 
     // Clear pending action after successful preparation (prevents repeated signing prompts)
-    runtime.pendingAction = null;
+    session.pendingAction = null;
 
-    pushLog(cluster, "info", `Bundle prepared (simulated). id=${bundleId} txs=${encodedTransactionsBase58.length}`);
+    pushSessionLog(
+      cluster,
+      owner,
+      "info",
+      `Bundle prepared (simulated). id=${bundleId} txs=${encodedTransactionsBase58.length}`
+    );
     return res.json({ ok: true, bundleId, simulation: sim });
   } catch (e: any) {
-    pushLog(cluster, "error", `prepare-bundle failed: ${e?.message ?? String(e)}`);
+    pushSessionLog(cluster, owner, "error", `prepare-bundle failed: ${e?.message ?? String(e)}`);
     return res.status(500).json({ error: e?.message ?? "prepare-bundle failed" });
   }
 });
@@ -220,24 +247,25 @@ router.post("/submit-bundle", async (req, res) => {
   const parsed = z
     .object({
       cluster: clusterSchema.default("mainnet-beta"),
+      owner: ownerSchema,
       bundleId: z.string().uuid()
     })
     .safeParse(req.body ?? {});
   if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
 
-  const { cluster, bundleId } = parsed.data;
-  const runtime = state[cluster];
+  const { cluster, owner, bundleId } = parsed.data;
+  const session = getOrCreateSession(cluster, owner);
   if (cluster === "devnet") {
     return res.status(400).json({ error: "Jito bundles are mainnet-only." });
   }
 
-  const prepared = runtime.preparedBundles.get(bundleId);
+  const prepared = session.preparedBundles.get(bundleId);
   if (!prepared) return res.status(404).json({ error: "Unknown bundleId (not prepared)" });
 
   try {
     const sendResult = await jito.sendBundle(cluster, prepared.encodedTransactionsBase58);
 
-    const status = runtime.bundles.get(bundleId);
+    const status = session.bundles.get(bundleId);
     if (status) {
       status.state = "submitted";
       status.lastUpdateMs = Date.now();
@@ -245,7 +273,7 @@ router.post("/submit-bundle", async (req, res) => {
       status.jitoStatus = { sendResult };
     }
 
-    pushLog(cluster, "info", `Bundle submitted to Jito. localId=${bundleId}`);
+    pushSessionLog(cluster, owner, "info", `Bundle submitted to Jito. localId=${bundleId}`);
 
     // Poll once immediately (frontend can keep polling /api/status)
     try {
@@ -261,13 +289,13 @@ router.post("/submit-bundle", async (req, res) => {
 
     return res.json({ ok: true, bundleId, sendResult });
   } catch (e: any) {
-    const status = runtime.bundles.get(bundleId);
+    const status = session.bundles.get(bundleId);
     if (status) {
       status.state = "error";
       status.lastUpdateMs = Date.now();
       status.error = e?.message ?? String(e);
     }
-    pushLog(cluster, "error", `sendBundle failed: ${e?.message ?? String(e)}`);
+    pushSessionLog(cluster, owner, "error", `sendBundle failed: ${e?.message ?? String(e)}`);
     return res.status(500).json({ error: e?.message ?? "sendBundle failed" });
   }
 });

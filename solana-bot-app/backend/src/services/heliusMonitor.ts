@@ -2,8 +2,8 @@ import WebSocket from "ws";
 import { jito } from "./jito.js";
 import { buildUnsignedBuyLikeTxBase64, buildUnsignedJitoTipTxBase64, randomTipLamports } from "./txBuilder.js";
 import { getWsUrl } from "../utils/env.js";
-import type { BotConfig, Cluster } from "../state/store.js";
-import { pushLog, state } from "../state/store.js";
+import type { BotConfig, Cluster, WalletSession } from "../state/store.js";
+import { getOrCreateSession, pushClusterLog, pushSessionLog, state } from "../state/store.js";
 
 // Raydium AMM program ID (mainnet): required by spec.
 export const RAYDIUM_AMM_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1dvX";
@@ -22,23 +22,24 @@ function looksLikeRaydiumPoolInit(logs: string[]) {
   return logs.some((l) => /initialize2|initialize/i.test(l));
 }
 
-export async function startMonitoring(config: BotConfig) {
-  const cluster = config.cluster;
+function anySessionsRunning(cluster: Cluster) {
   const runtime = state[cluster];
-  if (runtime.running) return;
+  for (const s of runtime.sessions.values()) if (s.running) return true;
+  return false;
+}
 
-  runtime.running = true;
-  runtime.config = config;
-  runtime.pendingAction = null;
+export async function ensureClusterSubscription(cluster: Cluster) {
+  const runtime = state[cluster];
+  if (runtime.ws) return;
 
   const wsUrl = getWsUrl(cluster);
-  pushLog(cluster, "info", `Connecting WebSocket: ${wsUrl}`);
+  pushClusterLog(cluster, "info", `Connecting WebSocket: ${wsUrl}`);
 
   const ws = new WebSocket(wsUrl);
   runtime.ws = ws;
 
   ws.on("open", () => {
-    pushLog(cluster, "info", "WebSocket connected; subscribing to Raydium AMM logs...");
+    pushClusterLog(cluster, "info", "WebSocket connected; subscribing to Raydium AMM logs...");
     const subReq = {
       jsonrpc: "2.0",
       id: 1,
@@ -53,7 +54,7 @@ export async function startMonitoring(config: BotConfig) {
 
     if (msg.id === 1 && msg.result) {
       runtime.wsSubId = msg.result;
-      pushLog(cluster, "info", `Subscribed. subscriptionId=${runtime.wsSubId}`);
+      pushClusterLog(cluster, "info", `Subscribed. subscriptionId=${runtime.wsSubId}`);
       return;
     }
 
@@ -66,99 +67,113 @@ export async function startMonitoring(config: BotConfig) {
     if (!signature || logs.length === 0) return;
     if (!looksLikeRaydiumPoolInit(logs)) return;
 
-    // One-at-a-time: require user signature before preparing another action.
-    if (runtime.pendingAction) return;
+    pushClusterLog(cluster, "info", `Raydium pool init signal. sig=${signature}`);
 
-    pushLog(cluster, "info", `Detected potential Raydium pool init. sig=${signature}`);
+    // Fan out to each running wallet session (sniper/volume can be different wallets).
+    for (const s of runtime.sessions.values()) {
+      if (!s.running || !s.config) continue;
+      if (s.pendingAction) continue; // one-at-a-time per wallet
 
-    // NOTE:
-    // - Proper liquidity filtering requires parsing pool accounts and reading reserves.
-    // - This template logs the event and prepares a keyless "buy intent" transaction that the
-    //   frontend wallet signs. Replace txBuilder with real Raydium swap instructions in production.
-    if (config.minLiquiditySol > 0) {
-      pushLog(
-        cluster,
-        "warn",
-        "Liquidity filter is a template placeholder. Implement Raydium pool state parsing to enforce it."
-      );
+      // NOTE: Proper snipe list / mint filtering requires parsing the pool tx/accounts.
+      // This template sets a pending action as a safe prompt to sign when running.
+      s.pendingAction = {
+        type: "SIGN_AND_BUNDLE",
+        reason: `[${s.config.mode}] Pool detected (${signature}). Click "Sign & submit pending bundle".`,
+        unsignedTxsBase64: []
+      };
+      (s.pendingAction as any).poolSignature = signature;
+      (s.pendingAction as any).needsUnsignedTxs = true;
+      pushSessionLog(cluster, s.owner, "info", `Pending action created for pool sig=${signature}`);
     }
-
-    const ownerHint = "WALLET_WILL_SET_OWNER";
-    runtime.pendingAction = {
-      type: "SIGN_AND_BUNDLE",
-      reason: `Pool detected (${signature}). Sign to submit an atomic Jito bundle (buy + tip).`,
-      unsignedTxsBase64: []
-    };
-
-    // The backend cannot know the user's public key unless the frontend supplies it.
-    // We generate unsigned txs on-demand from the /api/status-driven flow.
-    // Here we store only the signature marker; /api/status endpoint will convert it.
-    // (See routes/api.ts pendingAction synthesis.)
-    runtime.pendingAction.reason = `Pool detected (${signature}). Click "Sign & submit pending bundle".`;
-    (runtime.pendingAction as any).poolSignature = signature;
-    (runtime.pendingAction as any).needsUnsignedTxs = true;
   });
 
   ws.on("close", () => {
-    pushLog(cluster, "warn", "WebSocket closed");
+    pushClusterLog(cluster, "warn", "WebSocket closed");
     runtime.ws = undefined;
     runtime.wsSubId = undefined;
-    runtime.running = false;
   });
 
   ws.on("error", (err) => {
-    pushLog(cluster, "error", `WebSocket error: ${String(err)}`);
+    pushClusterLog(cluster, "error", `WebSocket error: ${String(err)}`);
   });
 }
 
-export async function stopMonitoring(cluster: Cluster) {
-  const runtime = state[cluster];
-  runtime.running = false;
-  runtime.config = null;
-  runtime.pendingAction = null;
+export async function startWalletSession(owner: string, config: BotConfig) {
+  const cluster = config.cluster;
+  const session = getOrCreateSession(cluster, owner);
+  session.running = true;
+  session.config = config;
+  session.pendingAction = null;
 
-  if (runtime.ws) {
-    try {
-      runtime.ws.close();
-    } catch {
-      // ignore
+  pushSessionLog(cluster, owner, "info", `Session started. mode=${config.mode} mev=${config.mevEnabled}`);
+  await ensureClusterSubscription(cluster);
+}
+
+export async function stopWalletSession(cluster: Cluster, owner: string) {
+  const session = getOrCreateSession(cluster, owner);
+  session.running = false;
+  session.config = null;
+  session.pendingAction = null;
+  pushSessionLog(cluster, owner, "info", "Session stopped");
+
+  // If nobody is running, close WS to reduce resource usage.
+  if (!anySessionsRunning(cluster)) {
+    const runtime = state[cluster];
+    if (runtime.ws) {
+      try {
+        runtime.ws.close();
+      } catch {
+        // ignore
+      }
+      runtime.ws = undefined;
+      runtime.wsSubId = undefined;
+      pushClusterLog(cluster, "info", "Closed cluster WebSocket (no active sessions).");
     }
   }
-  runtime.ws = undefined;
-  runtime.wsSubId = undefined;
-  pushLog(cluster, "info", "Monitoring stopped");
 }
 
 /**
- * Called by the status API when the frontend provides an owner public key.
- * We materialize unsigned txs only when we know the owner, keeping the backend keyless.
+ * Called by the status API for a specific owner.
+ * We materialize unsigned txs only when the owner is requesting it (fresh blockhash),
+ * keeping the backend keyless and reducing "blockhash not found" failures.
  */
-export async function materializePendingUnsignedTxs(opts: {
+export async function materializePendingUnsignedTxsForSession(opts: {
   cluster: Cluster;
   owner: string;
 }): Promise<string[] | null> {
-  const runtime = state[opts.cluster];
-  const cfg = runtime.config;
-  const pa: any = runtime.pendingAction;
-  if (!runtime.pendingAction || !pa?.needsUnsignedTxs) return null;
+  const session = getOrCreateSession(opts.cluster, opts.owner);
+  const cfg = session.config;
+  const pa: any = session.pendingAction;
+  if (!session.pendingAction || !pa?.needsUnsignedTxs) return null;
   if (!cfg) return null;
 
   const poolSig = String(pa.poolSignature ?? "unknown");
 
+  // NOTE:
+  // - Proper liquidity filtering requires parsing pool accounts and reading reserves.
+  // - Replace txBuilder with real Raydium swap instructions in production.
+  if (cfg.minLiquiditySol > 0) {
+    pushSessionLog(
+      opts.cluster,
+      opts.owner,
+      "warn",
+      "Liquidity filter is a template placeholder. Implement Raydium pool state parsing to enforce it."
+    );
+  }
+
   const unsigned: string[] = [];
 
-  // In a real bot, you'd build a Raydium swap here (buy), and optionally a sell tx.
   const buyTx = await buildUnsignedBuyLikeTxBase64({
     cluster: opts.cluster,
     owner: opts.owner,
     amountSol: cfg.buyAmountSol,
-    memo: `raydium_pool_sig=${poolSig}`
+    memo: `mode=${cfg.mode} raydium_pool_sig=${poolSig}`
   });
   unsigned.push(buyTx);
 
   if (cfg.mevEnabled) {
     if (opts.cluster === "devnet") {
-      pushLog(opts.cluster, "warn", "MEV enabled but cluster=devnet; skipping tip tx (Jito mainnet-only).");
+      pushSessionLog(opts.cluster, opts.owner, "warn", "MEV enabled but cluster=devnet; skipping tip tx.");
     } else {
       const tipAccounts = await jito.getTipAccounts(opts.cluster);
       const tipAccount = tipAccounts[Math.floor(Math.random() * tipAccounts.length)];
@@ -168,7 +183,7 @@ export async function materializePendingUnsignedTxs(opts: {
         owner: opts.owner,
         tipAccount,
         tipLamports,
-        memo: `Jito tip | pool=${poolSig}`
+        memo: `Jito tip | mode=${cfg.mode} | pool=${poolSig}`
       });
       unsigned.push(tipTx);
     }

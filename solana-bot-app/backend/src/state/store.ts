@@ -46,21 +46,28 @@ export type PreparedBundle = {
   createdAtMs: number;
 };
 
-export type ClusterRuntime = {
+export type WalletSession = {
+  owner: string; // base58 pubkey (never a private key)
   running: boolean;
   config: BotConfig | null;
   logs: LogLine[];
   bundles: Map<string, BundleStatus>;
   preparedBundles: Map<string, PreparedBundle>;
   pendingAction: PendingAction;
+};
+
+export type ClusterRuntime = {
   ws?: WebSocket;
   wsSubId?: number;
+  clusterLogs: LogLine[];
+  sessions: Map<string, WalletSession>; // owner -> session
 };
 
 const MAX_LOGS = 500;
 
-function makeRuntime(): ClusterRuntime {
+function makeSession(owner: string): WalletSession {
   return {
+    owner,
     running: false,
     config: null,
     logs: [],
@@ -70,14 +77,35 @@ function makeRuntime(): ClusterRuntime {
   };
 }
 
+function makeRuntime(): ClusterRuntime {
+  return { clusterLogs: [], sessions: new Map() };
+}
+
 export const state: Record<Cluster, ClusterRuntime> = {
   "mainnet-beta": makeRuntime(),
   devnet: makeRuntime()
 };
 
-export function pushLog(cluster: Cluster, level: LogLine["level"], msg: string) {
+export function getOrCreateSession(cluster: Cluster, owner: string): WalletSession {
   const runtime = state[cluster];
-  runtime.logs.push({ ts: Date.now(), level, msg });
-  if (runtime.logs.length > MAX_LOGS) runtime.logs.splice(0, runtime.logs.length - MAX_LOGS);
+  const existing = runtime.sessions.get(owner);
+  if (existing) return existing;
+  const s = makeSession(owner);
+  runtime.sessions.set(owner, s);
+  return s;
+}
+
+export function pushClusterLog(cluster: Cluster, level: LogLine["level"], msg: string) {
+  const runtime = state[cluster];
+  runtime.clusterLogs.push({ ts: Date.now(), level, msg });
+  if (runtime.clusterLogs.length > MAX_LOGS) {
+    runtime.clusterLogs.splice(0, runtime.clusterLogs.length - MAX_LOGS);
+  }
+}
+
+export function pushSessionLog(cluster: Cluster, owner: string, level: LogLine["level"], msg: string) {
+  const s = getOrCreateSession(cluster, owner);
+  s.logs.push({ ts: Date.now(), level, msg });
+  if (s.logs.length > MAX_LOGS) s.logs.splice(0, s.logs.length - MAX_LOGS);
 }
 
