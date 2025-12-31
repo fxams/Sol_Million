@@ -129,10 +129,16 @@ export function Dashboard() {
     });
     if (!res.ok) throw new Error(`status failed (${res.status})`);
     const data = (await res.json()) as BotStatus;
-    setRunning(data.running);
-    setLogs(data.logs ?? []);
-    setBundles(data.bundles ?? []);
-    setPendingAction(data.pendingAction ?? null);
+    // During wallet autoConnect or transient disconnects, owner can briefly be undefined.
+    // Avoid wiping session-specific UI state in those moments.
+    const hasOwner = Boolean(wallet.publicKey);
+    if (hasOwner) {
+      setRunning(data.running);
+      setBundles(data.bundles ?? []);
+      setPendingAction(data.pendingAction ?? null);
+    }
+    // Logs can always be updated (backend returns cluster logs even without owner).
+    if (data.logs) setLogs(data.logs);
     setSessions(data.sessions ?? []);
   }, [backendBaseUrl, cluster, wallet.publicKey]);
 

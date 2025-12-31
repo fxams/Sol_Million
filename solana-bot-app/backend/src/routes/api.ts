@@ -66,7 +66,18 @@ router.get("/status", async (req, res) => {
   }));
 
   if (!owner) {
-    return res.json({ ok: true, cluster, sessions, clusterLogs: runtime.clusterLogs });
+    // IMPORTANT: keep response shape stable so the frontend polling loop
+    // doesn't "wipe" UI state during wallet reconnects (owner temporarily undefined).
+    return res.json({
+      ok: true,
+      running: false,
+      cluster,
+      logs: runtime.clusterLogs,
+      bundles: [],
+      pendingAction: null,
+      sessions,
+      clusterLogs: runtime.clusterLogs
+    });
   }
 
   const session = getOrCreateSession(cluster, owner);
