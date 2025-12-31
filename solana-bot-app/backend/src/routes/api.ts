@@ -22,6 +22,20 @@ const configSchema = z.object({
   cluster: clusterSchema.default("mainnet-beta"),
   mode: z.enum(["snipe", "volume"]).default("snipe"),
   pumpFunPhase: z.enum(["pre", "post"]).default("post"),
+  snipeTargetMode: z.enum(["list", "auto"]).default("list"),
+  autoSnipe: z
+    .object({
+      maxTxAgeSec: z.number().finite().min(1).max(300).default(20),
+      windowSec: z.number().finite().min(1).max(120).default(8),
+      minSignalsInWindow: z.number().int().min(1).max(100).default(3),
+      minUniqueFeePayersInWindow: z.number().int().min(1).max(100).default(3),
+      requireMintAuthorityDisabled: z.boolean().default(true),
+      requireFreezeAuthorityDisabled: z.boolean().default(true),
+      allowToken2022: z.boolean().default(false),
+      maxTop1HolderPct: z.number().finite().min(0).max(100).default(20),
+      maxTop10HolderPct: z.number().finite().min(0).max(100).default(60)
+    })
+    .default({}),
   mevEnabled: z.boolean().default(true),
   buyAmountSol: z.number().finite().positive().max(10_000),
   takeProfitPct: z.number().finite().min(0).max(10_000).default(0),

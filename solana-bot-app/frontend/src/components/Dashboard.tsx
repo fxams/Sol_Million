@@ -10,6 +10,7 @@ import { Buffer } from "buffer";
 
 type BotMode = "snipe" | "volume";
 type PumpFunPhase = "pre" | "post";
+type SnipeTargetMode = "list" | "auto";
 
 type PendingAction =
   | {
@@ -77,6 +78,14 @@ export function Dashboard() {
 
   const [mode, setMode] = useState<BotMode>("snipe");
   const [pumpFunPhase, setPumpFunPhase] = useState<PumpFunPhase>("pre");
+  const [snipeTargetMode, setSnipeTargetMode] = useState<SnipeTargetMode>("auto");
+  const [autoMaxTxAgeSec, setAutoMaxTxAgeSec] = useState("20");
+  const [autoWindowSec, setAutoWindowSec] = useState("8");
+  const [autoMinSignals, setAutoMinSignals] = useState("3");
+  const [autoMinUniquePayers, setAutoMinUniquePayers] = useState("3");
+  const [autoMaxTop1Pct, setAutoMaxTop1Pct] = useState("20");
+  const [autoMaxTop10Pct, setAutoMaxTop10Pct] = useState("60");
+  const [autoAllowToken2022, setAutoAllowToken2022] = useState(false);
   const [mevEnabled, setMevEnabled] = useState(true);
   const [buyAmountSol, setBuyAmountSol] = useState("0.1");
   const [takeProfitPct, setTakeProfitPct] = useState("30");
@@ -138,6 +147,18 @@ export function Dashboard() {
       cluster,
       mode,
       pumpFunPhase,
+      snipeTargetMode,
+      autoSnipe: {
+        maxTxAgeSec: Number(autoMaxTxAgeSec),
+        windowSec: Number(autoWindowSec),
+        minSignalsInWindow: Number(autoMinSignals),
+        minUniqueFeePayersInWindow: Number(autoMinUniquePayers),
+        requireMintAuthorityDisabled: true,
+        requireFreezeAuthorityDisabled: true,
+        allowToken2022: autoAllowToken2022,
+        maxTop1HolderPct: Number(autoMaxTop1Pct),
+        maxTop10HolderPct: Number(autoMaxTop10Pct)
+      },
       mevEnabled,
       buyAmountSol: Number(buyAmountSol),
       takeProfitPct: Number(takeProfitPct),
@@ -153,6 +174,14 @@ export function Dashboard() {
       cluster,
       mode,
       pumpFunPhase,
+      snipeTargetMode,
+      autoMaxTxAgeSec,
+      autoWindowSec,
+      autoMinSignals,
+      autoMinUniquePayers,
+      autoMaxTop1Pct,
+      autoMaxTop10Pct,
+      autoAllowToken2022,
       mevEnabled,
       buyAmountSol,
       takeProfitPct,
@@ -499,6 +528,98 @@ export function Dashboard() {
                   <option value="post">Post-migration (Raydium)</option>
                 </select>
               </label>
+
+              {mode === "snipe" && pumpFunPhase === "pre" && (
+                <>
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span className="text-slate-300">Snipe target selection</span>
+                    <select
+                      className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
+                      value={snipeTargetMode}
+                      onChange={(e) => setSnipeTargetMode(e.target.value as SnipeTargetMode)}
+                      disabled={loading}
+                    >
+                      <option value="auto">Auto (new Pump.fun mints + safety filters)</option>
+                      <option value="list">Mint list only</option>
+                    </select>
+                  </label>
+
+                  {snipeTargetMode === "auto" && (
+                    <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-200 sm:col-span-2">
+                      <div className="font-semibold text-slate-100">Auto-snipe filters (recommended defaults)</div>
+                      <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                        <label className="flex flex-col gap-1">
+                          <span className="text-slate-400">Max tx age (sec)</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                            value={autoMaxTxAgeSec}
+                            onChange={(e) => setAutoMaxTxAgeSec(e.target.value)}
+                            inputMode="numeric"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-slate-400">Window (sec)</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                            value={autoWindowSec}
+                            onChange={(e) => setAutoWindowSec(e.target.value)}
+                            inputMode="numeric"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-slate-400">Min signals</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                            value={autoMinSignals}
+                            onChange={(e) => setAutoMinSignals(e.target.value)}
+                            inputMode="numeric"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-slate-400">Min unique payers</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                            value={autoMinUniquePayers}
+                            onChange={(e) => setAutoMinUniquePayers(e.target.value)}
+                            inputMode="numeric"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-slate-400">Max top1 %</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                            value={autoMaxTop1Pct}
+                            onChange={(e) => setAutoMaxTop1Pct(e.target.value)}
+                            inputMode="decimal"
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1">
+                          <span className="text-slate-400">Max top10 %</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                            value={autoMaxTop10Pct}
+                            onChange={(e) => setAutoMaxTop10Pct(e.target.value)}
+                            inputMode="decimal"
+                          />
+                        </label>
+                      </div>
+                      <label className="mt-3 flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900 px-3 py-2">
+                        <span className="text-slate-200">Allow Token-2022 mints (riskier)</span>
+                        <input
+                          type="checkbox"
+                          checked={autoAllowToken2022}
+                          onChange={(e) => setAutoAllowToken2022(e.target.checked)}
+                          disabled={loading}
+                        />
+                      </label>
+                      <div className="mt-2 text-slate-400">
+                        Auto mode only triggers when a mint passes safety checks (mint+freeze authority disabled,
+                        holder concentration caps) and shows enough early momentum.
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
 
             <div className="mt-4">
@@ -526,8 +647,14 @@ export function Dashboard() {
                   placeholder="Mint addresses, separated by commas/spaces/newlines"
                   value={snipeList}
                   onChange={(e) => setSnipeList(e.target.value)}
+                  disabled={mode === "snipe" && pumpFunPhase === "pre" && snipeTargetMode === "auto"}
                 />
               </label>
+              {mode === "snipe" && pumpFunPhase === "pre" && snipeTargetMode === "auto" && (
+                <div className="mt-2 text-xs text-slate-400">
+                  Auto mode ignores the snipe list and discovers targets automatically.
+                </div>
+              )}
             </div>
 
             <div className="mt-5 flex flex-wrap gap-2">

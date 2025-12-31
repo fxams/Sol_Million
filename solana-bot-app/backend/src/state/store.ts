@@ -3,6 +3,28 @@ import type WebSocket from "ws";
 export type Cluster = "mainnet-beta" | "devnet";
 export type BotMode = "snipe" | "volume";
 export type PumpFunPhase = "pre" | "post";
+export type SnipeTargetMode = "list" | "auto";
+
+export type AutoSnipeConfig = {
+  /**
+   * Only consider a tx "new enough" to be a new-mint candidate.
+   * This is a practical guard against reacting to old Pump.fun tokens.
+   */
+  maxTxAgeSec: number;
+  /** Momentum window and thresholds */
+  windowSec: number;
+  minSignalsInWindow: number;
+  minUniqueFeePayersInWindow: number;
+
+  /** Safety filters */
+  requireMintAuthorityDisabled: boolean;
+  requireFreezeAuthorityDisabled: boolean;
+  allowToken2022: boolean;
+
+  /** Holder concentration caps (percent) */
+  maxTop1HolderPct: number;
+  maxTop10HolderPct: number;
+};
 
 export type BotConfig = {
   cluster: Cluster;
@@ -13,6 +35,13 @@ export type BotConfig = {
    * - "post": post-migration (Raydium pool)
    */
   pumpFunPhase: PumpFunPhase;
+  /**
+   * How to choose what to snipe:
+   * - "list": only snipe mints listed in snipeList
+   * - "auto": discover new mints from on-chain signals and apply filters
+   */
+  snipeTargetMode: SnipeTargetMode;
+  autoSnipe: AutoSnipeConfig;
   mevEnabled: boolean;
   buyAmountSol: number;
   takeProfitPct: number;

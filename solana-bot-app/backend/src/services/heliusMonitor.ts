@@ -1,5 +1,5 @@
 import WebSocket from "ws";
-import { Connection } from "@solana/web3.js";
+import { Connection, PublicKey } from "@solana/web3.js";
 import { jito } from "./jito.js";
 import { buildUnsignedBuyLikeTxBase64, buildUnsignedJitoTipTxBase64, randomTipLamports } from "./txBuilder.js";
 import { env, getRpcUrl, getWsUrl } from "../utils/env.js";
@@ -29,6 +29,105 @@ function looksLikeRaydiumPoolInit(logs: string[]) {
 function looksLikePumpfunTradeSignal(logs: string[]) {
   // Heuristic only. Real Pump.fun parsing should read the transaction and decode instructions.
   return logs.some((l) => /buy|sell|create|initialize/i.test(l));
+}
+
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
+
+function u32le(buf: Buffer, off: number) {
+  return buf.readUInt32LE(off);
+}
+function u64le(buf: Buffer, off: number) {
+  const lo = BigInt(buf.readUInt32LE(off));
+  const hi = BigInt(buf.readUInt32LE(off + 4));
+  return (hi << 32n) + lo;
+}
+
+function parseMintAccount(data: Buffer) {
+  // SPL Mint layout: 82 bytes
+  if (data.length < 82) return null;
+  const mintAuthorityOption = u32le(data, 0);
+  const supply = u64le(data, 36);
+  const decimals = data.readUInt8(44);
+  const isInitialized = data.readUInt8(45) === 1;
+  const freezeAuthorityOption = u32le(data, 46);
+  return { mintAuthorityOption, freezeAuthorityOption, supply, decimals, isInitialized };
+}
+
+async function inferMintFromPumpfunTx(opts: { cluster: Cluster; signature: string }) {
+  const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
+  const tx = await connection.getTransaction(opts.signature, {
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 0
+  });
+  if (!tx) return null;
+
+  // Prefer token balance mints (cheap and usually correct for buys/sells)
+  const mints = new Set<string>();
+  for (const b of tx.meta?.postTokenBalances ?? []) if (b.mint) mints.add(b.mint);
+  for (const b of tx.meta?.preTokenBalances ?? []) if (b.mint) mints.add(b.mint);
+  if (mints.size === 1) return { mint: Array.from(mints)[0], tx };
+  if (mints.size > 1) {
+    // Heuristic: pick the first mint (most Pump.fun trades involve just one token mint)
+    return { mint: Array.from(mints)[0], tx };
+  }
+
+  // Fallback: probe a few account keys for a mint-like account
+  const keys = tx.transaction.message.getAccountKeys().staticAccountKeys;
+  const probe = keys.slice(0, 25);
+  for (const k of probe) {
+    const info = await connection.getAccountInfo(k, "confirmed");
+    if (!info) continue;
+    if (!info.owner.equals(TOKEN_PROGRAM_ID) && !info.owner.equals(TOKEN_2022_PROGRAM_ID)) continue;
+    const parsed = parseMintAccount(Buffer.from(info.data));
+    if (!parsed?.isInitialized) continue;
+    return { mint: k.toBase58(), tx };
+  }
+
+  return { mint: null, tx };
+}
+
+async function checkMintSafety(opts: {
+  cluster: Cluster;
+  mint: string;
+  cfg: BotConfig["autoSnipe"];
+}): Promise<{ ok: boolean; reason?: string; top1Pct?: number; top10Pct?: number }> {
+  const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
+  const mintPk = new PublicKey(opts.mint);
+  const acc = await connection.getAccountInfo(mintPk, "confirmed");
+  if (!acc) return { ok: false, reason: "mint account not found" };
+
+  const is2022 = acc.owner.equals(TOKEN_2022_PROGRAM_ID);
+  const isToken = acc.owner.equals(TOKEN_PROGRAM_ID);
+  if (!isToken && !is2022) return { ok: false, reason: "not a token mint account" };
+  if (is2022 && !opts.cfg.allowToken2022) return { ok: false, reason: "token-2022 not allowed" };
+
+  const parsed = parseMintAccount(Buffer.from(acc.data));
+  if (!parsed?.isInitialized) return { ok: false, reason: "mint not initialized" };
+  if (opts.cfg.requireMintAuthorityDisabled && parsed.mintAuthorityOption !== 0) {
+    return { ok: false, reason: "mint authority still enabled" };
+  }
+  if (opts.cfg.requireFreezeAuthorityDisabled && parsed.freezeAuthorityOption !== 0) {
+    return { ok: false, reason: "freeze authority still enabled" };
+  }
+
+  // Holder concentration checks (best-effort, can fail early at launch)
+  const supplyResp = await connection.getTokenSupply(mintPk, "confirmed");
+  const supply = BigInt(supplyResp.value.amount);
+  if (supply === 0n) return { ok: false, reason: "zero supply" };
+
+  const largest = await connection.getTokenLargestAccounts(mintPk, "confirmed");
+  const amounts = largest.value.map((a) => BigInt(a.amount));
+  const top1 = amounts[0] ?? 0n;
+  const top10 = amounts.slice(0, 10).reduce((s, x) => s + x, 0n);
+
+  const top1Pct = Number((top1 * 10_000n) / supply) / 100;
+  const top10Pct = Number((top10 * 10_000n) / supply) / 100;
+
+  if (top1Pct > opts.cfg.maxTop1HolderPct) return { ok: false, reason: `top1 too high (${top1Pct}%)`, top1Pct, top10Pct };
+  if (top10Pct > opts.cfg.maxTop10HolderPct) return { ok: false, reason: `top10 too high (${top10Pct}%)`, top1Pct, top10Pct };
+
+  return { ok: true, top1Pct, top10Pct };
 }
 
 async function txMentionsAnyOfMints(opts: {
@@ -152,18 +251,57 @@ export async function ensureClusterSubscription(cluster: Cluster) {
 
       // If a snipe list is provided, only trigger on matching mints.
       const snipeSet = new Set((s.config.snipeList ?? []).map((x) => x.trim()).filter(Boolean));
-      if (s.config.mode === "snipe" && snipeSet.size === 0) {
-        // For real sniping you almost always want a target mint. Without it, Pump.fun is a firehose.
-        const lastWarn = (s as any)._lastEmptySnipeWarnMs as number | undefined;
-        const now = Date.now();
-        if (!lastWarn || now - lastWarn > 60_000) {
-          (s as any)._lastEmptySnipeWarnMs = now;
-          pushSessionLog(cluster, s.owner, "warn", "Snipe list is empty. Add a Pump.fun mint to snipe list to trigger actions.");
-        }
-        continue;
-      }
 
-      if (s.config.mode === "snipe" && snipeSet.size > 0) {
+      // Best default sniping mode: "auto" on Pump.fun pre-migration, with strong safety filters.
+      if (s.config.mode === "snipe" && s.config.pumpFunPhase === "pre" && sourceKey === "pumpfun" && s.config.snipeTargetMode === "auto") {
+        try {
+          const inferred = await inferMintFromPumpfunTx({ cluster, signature });
+          const mint = inferred?.mint;
+          const tx = inferred?.tx;
+          if (!mint || !tx) continue;
+
+          const now = Date.now();
+          const bt = tx.blockTime ? tx.blockTime * 1000 : now;
+          const ageSec = Math.floor((now - bt) / 1000);
+          if (ageSec > s.config.autoSnipe.maxTxAgeSec) continue;
+
+          // Per-session momentum tracking
+          const stats: Map<string, any> = (s as any)._autoMintStats ?? new Map();
+          (s as any)._autoMintStats = stats;
+
+          let st = stats.get(mint);
+          if (!st || now - st.firstSeenMs > s.config.autoSnipe.windowSec * 1000) {
+            st = { firstSeenMs: now, count: 0, payers: new Set<string>(), safety: null };
+            stats.set(mint, st);
+          }
+
+          st.count += 1;
+          const payer = tx.transaction.message.getAccountKeys().staticAccountKeys[0]?.toBase58();
+          if (payer) st.payers.add(payer);
+
+          // Run safety check once per mint per session window
+          if (!st.safety) st.safety = await checkMintSafety({ cluster, mint, cfg: s.config.autoSnipe });
+          if (!st.safety.ok) continue;
+
+          if (st.count < s.config.autoSnipe.minSignalsInWindow) continue;
+          if (st.payers.size < s.config.autoSnipe.minUniqueFeePayersInWindow) continue;
+
+          (s as any)._matchedMints = [mint];
+        } catch (e: any) {
+          pushSessionLog(cluster, s.owner, "warn", `Auto-snipe check failed: ${e?.message ?? String(e)}`);
+          continue;
+        }
+      } else if (s.config.mode === "snipe" && s.config.snipeTargetMode === "list") {
+        // List-based sniping: must specify a mint list.
+        if (snipeSet.size === 0) {
+          const lastWarn = (s as any)._lastEmptySnipeWarnMs as number | undefined;
+          const now = Date.now();
+          if (!lastWarn || now - lastWarn > 60_000) {
+            (s as any)._lastEmptySnipeWarnMs = now;
+            pushSessionLog(cluster, s.owner, "warn", "Snipe list is empty. Add a mint to snipe list or switch to Auto mode.");
+          }
+          continue;
+        }
         try {
           const matches = await txMentionsAnyOfMints({ cluster, signature, mintSet: snipeSet });
           if (matches.length === 0) continue;
