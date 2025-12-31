@@ -218,6 +218,27 @@ with real swap instructions, e.g.:
 
 ---
 
+## Auto-redeploy on every push to `main` (Vercel + Render)
+
+This repo includes a GitHub Actions workflow at `.github/workflows/deploy.yml` that triggers deploy hooks on every push
+to `main`.
+
+### 1) Create deploy hooks
+
+- **Vercel**: Project → Settings → Git → **Deploy Hooks** → create a hook (branch: `main`)
+- **Render**: Service → Settings → **Deploy Hook** → copy the hook URL
+
+### 2) Add GitHub Secrets
+
+In GitHub: Repo → Settings → Secrets and variables → Actions → **New repository secret**
+
+- `VERCEL_DEPLOY_HOOK_URL` = (your Vercel deploy hook URL)
+- `RENDER_DEPLOY_HOOK_URL` = (your Render deploy hook URL)
+
+After that, every commit pushed to `main` will trigger redeploys on both services.
+
+---
+
 ## Risk & safety warnings
 
 - Use a **burner wallet** first.

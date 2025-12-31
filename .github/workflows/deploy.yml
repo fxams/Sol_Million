@@ -1,0 +1,30 @@
+name: Auto deploy (Vercel + Render)
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Vercel deploy hook
+        env:
+          VERCEL_DEPLOY_HOOK_URL: ${{ secrets.VERCEL_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "${VERCEL_DEPLOY_HOOK_URL}" ]; then
+            echo "Missing secret: VERCEL_DEPLOY_HOOK_URL"
+            exit 1
+          fi
+          curl -sS --fail-with-body -X POST "${VERCEL_DEPLOY_HOOK_URL}"
+
+      - name: Trigger Render deploy hook
+        env:
+          RENDER_DEPLOY_HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+        run: |
+          if [ -z "${RENDER_DEPLOY_HOOK_URL}" ]; then
+            echo "Missing secret: RENDER_DEPLOY_HOOK_URL"
+            exit 1
+          fi
+          curl -sS --fail-with-body -X POST "${RENDER_DEPLOY_HOOK_URL}"
+
