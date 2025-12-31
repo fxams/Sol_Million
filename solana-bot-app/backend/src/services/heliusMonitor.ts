@@ -82,6 +82,29 @@ async function withRpcLimit<T>(cluster: Cluster, fn: () => Promise<T>, limit = 2
   }
 }
 
+async function getTransactionFast(connection: Connection, cluster: Cluster, signature: string) {
+  // For sniping we want "fresh" txs. Prefer processed, then fall back to confirmed.
+  const attempt = async (commitment: "processed" | "confirmed") =>
+    await connection.getTransaction(signature, {
+      commitment,
+      maxSupportedTransactionVersion: 0
+    });
+
+  const txProcessed = await withRpcLimit(
+    cluster,
+    async () => await withRetries(async () => await attempt("processed"), { attempts: 2, baseDelayMs: 120 }),
+    2
+  );
+  if (txProcessed) return txProcessed;
+
+  const txConfirmed = await withRpcLimit(
+    cluster,
+    async () => await withRetries(async () => await attempt("confirmed"), { attempts: 2, baseDelayMs: 200 }),
+    2
+  );
+  return txConfirmed;
+}
+
 function u32le(buf: Buffer, off: number) {
   return buf.readUInt32LE(off);
 }
@@ -104,19 +127,7 @@ function parseMintAccount(data: Buffer) {
 
 async function inferMintFromPumpfunTx(opts: { cluster: Cluster; signature: string }) {
   const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
-  const tx = await withRpcLimit(
-    opts.cluster,
-    async () =>
-      await withRetries(
-        async () =>
-          await connection.getTransaction(opts.signature, {
-            commitment: "confirmed",
-            maxSupportedTransactionVersion: 0
-          }),
-        { attempts: 3, baseDelayMs: 200 }
-      ),
-    2
-  );
+  const tx = await getTransactionFast(connection, opts.cluster, opts.signature);
   if (!tx) return null;
 
   // Prefer token balance mints (cheap and usually correct for buys/sells)
@@ -226,19 +237,7 @@ async function txMentionsAnyOfMints(opts: {
 }): Promise<string[]> {
   if (opts.mintSet.size === 0) return [];
   const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
-  const tx = await withRpcLimit(
-    opts.cluster,
-    async () =>
-      await withRetries(
-        async () =>
-          await connection.getTransaction(opts.signature, {
-            commitment: "confirmed",
-            maxSupportedTransactionVersion: 0
-          }),
-        { attempts: 3, baseDelayMs: 200 }
-      ),
-    2
-  );
+  const tx = await getTransactionFast(connection, opts.cluster, opts.signature);
   const keys = getStaticAccountKeysFromTx(tx) ?? [];
   const matches: string[] = [];
   for (const k of keys) {
@@ -336,6 +335,29 @@ export async function ensureClusterSubscription(cluster: Cluster) {
       if (!s.running || !s.config) continue;
       if (s.pendingAction) continue; // one-at-a-time per wallet
 
+      // Rate-limited “heartbeat” so the UI doesn't feel stuck.
+      try {
+        const now = Date.now();
+        const hbKey = `_lastHeartbeatMs_${sourceKey}`;
+        const lastHb = (s as any)[hbKey] as number | undefined;
+        if (!lastHb || now - lastHb > 15_000) {
+          (s as any)[hbKey] = now;
+          const stats = (s as any)._autoSnipeStats as any | undefined;
+          if (stats?.totalSignals) {
+            pushSessionLog(
+              cluster,
+              s.owner,
+              "info",
+              `Auto-snipe stats: signals=${stats.totalSignals} txOk=${stats.txOk} mintInferred=${stats.mintInferred} safetyOk=${stats.safetyOk} triggered=${stats.triggered} rejects=${JSON.stringify(
+                stats.rejects ?? {}
+              )}`
+            );
+          }
+        }
+      } catch {
+        // ignore heartbeat errors
+      }
+
       // Route signals based on selected Pump.fun phase.
       // - For "pre" we react to Pump.fun signals
       // - For "post" we react to Raydium signals
@@ -352,25 +374,43 @@ export async function ensureClusterSubscription(cluster: Cluster) {
 
       // Best default sniping mode: "auto" on Pump.fun pre-migration, with strong safety filters.
       if (s.config.mode === "snipe" && s.config.pumpFunPhase === "pre" && sourceKey === "pumpfun" && s.config.snipeTargetMode === "auto") {
+        const stats: any = ((s as any)._autoSnipeStats ??= {
+          totalSignals: 0,
+          txOk: 0,
+          mintInferred: 0,
+          safetyOk: 0,
+          triggered: 0,
+          rejects: {}
+        });
+        stats.totalSignals += 1;
+
         try {
           const inferred = await inferMintFromPumpfunTx({ cluster, signature });
           const mint = inferred?.mint;
           const tx = inferred?.tx;
-          if (!mint || !tx) continue;
+          if (!mint || !tx) {
+            stats.rejects.noMint = (stats.rejects.noMint ?? 0) + 1;
+            continue;
+          }
+          stats.txOk += 1;
+          stats.mintInferred += 1;
 
           const now = Date.now();
           const bt = tx.blockTime ? tx.blockTime * 1000 : now;
           const ageSec = Math.floor((now - bt) / 1000);
-          if (ageSec > s.config.autoSnipe.maxTxAgeSec) continue;
+          if (ageSec > s.config.autoSnipe.maxTxAgeSec) {
+            stats.rejects.tooOld = (stats.rejects.tooOld ?? 0) + 1;
+            continue;
+          }
 
           // Per-session momentum tracking
-          const stats: Map<string, any> = (s as any)._autoMintStats ?? new Map();
-          (s as any)._autoMintStats = stats;
+          const mintStats: Map<string, any> = (s as any)._autoMintStats ?? new Map();
+          (s as any)._autoMintStats = mintStats;
 
-          let st = stats.get(mint);
+          let st = mintStats.get(mint);
           if (!st || now - st.firstSeenMs > s.config.autoSnipe.windowSec * 1000) {
             st = { firstSeenMs: now, count: 0, payers: new Set<string>(), safety: null };
-            stats.set(mint, st);
+            mintStats.set(mint, st);
           }
 
           st.count += 1;
@@ -379,12 +419,24 @@ export async function ensureClusterSubscription(cluster: Cluster) {
 
           // Run safety check once per mint per session window
           if (!st.safety) st.safety = await checkMintSafety({ cluster, mint, cfg: s.config.autoSnipe });
-          if (!st.safety.ok) continue;
+          if (!st.safety.ok) {
+            const r = String(st.safety.reason ?? "safety");
+            stats.rejects[r] = (stats.rejects[r] ?? 0) + 1;
+            continue;
+          }
+          stats.safetyOk += 1;
 
-          if (st.count < s.config.autoSnipe.minSignalsInWindow) continue;
-          if (st.payers.size < s.config.autoSnipe.minUniqueFeePayersInWindow) continue;
+          if (st.count < s.config.autoSnipe.minSignalsInWindow) {
+            stats.rejects.momentum = (stats.rejects.momentum ?? 0) + 1;
+            continue;
+          }
+          if (st.payers.size < s.config.autoSnipe.minUniqueFeePayersInWindow) {
+            stats.rejects.uniquePayers = (stats.rejects.uniquePayers ?? 0) + 1;
+            continue;
+          }
 
           (s as any)._matchedMints = [mint];
+          stats.triggered += 1;
         } catch (e: any) {
           pushSessionLog(cluster, s.owner, "warn", `Auto-snipe check failed: ${e?.message ?? String(e)}`);
           continue;
