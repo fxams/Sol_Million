@@ -57,6 +57,21 @@ function anySessionsRunning(cluster: Cluster) {
   return false;
 }
 
+function markSeenSignature(cluster: Cluster, signature: string) {
+  const runtime = state[cluster];
+  const seen = runtime.seenSignatures;
+  if (!seen) return false;
+  if (seen.has(signature)) return true;
+  seen.add(signature);
+  // cap memory
+  if (seen.size > 3000) {
+    // remove oldest-ish by recreating
+    const keep = Array.from(seen).slice(-2000);
+    runtime.seenSignatures = new Set(keep);
+  }
+  return false;
+}
+
 function subscribeLogs(runtime: any, ws: WebSocket, key: SourceKey, programId: string) {
   const reqId = Date.now() + Math.floor(Math.random() * 1000);
   runtime.wsPendingReqIdToKey?.set(reqId, key);
@@ -112,13 +127,12 @@ export async function ensureClusterSubscription(cluster: Cluster) {
     const logs = (value?.logs as string[]) ?? [];
 
     if (!signature || logs.length === 0) return;
+    if (markSeenSignature(cluster, signature)) return;
     const sourceKey = (subId ? runtime.wsSubKeyById?.get(subId) : undefined) as SourceKey | undefined;
     if (!sourceKey) return;
 
     if (sourceKey === "raydium" && !looksLikeRaydiumPoolInit(logs)) return;
     if (sourceKey === "pumpfun" && !looksLikePumpfunTradeSignal(logs)) return;
-
-    pushClusterLog(cluster, "info", `${sourceKey} signal. sig=${signature}`);
 
     // Fan out to each running wallet session (sniper/volume can be different wallets).
     for (const s of runtime.sessions.values()) {
@@ -138,6 +152,17 @@ export async function ensureClusterSubscription(cluster: Cluster) {
 
       // If a snipe list is provided, only trigger on matching mints.
       const snipeSet = new Set((s.config.snipeList ?? []).map((x) => x.trim()).filter(Boolean));
+      if (s.config.mode === "snipe" && snipeSet.size === 0) {
+        // For real sniping you almost always want a target mint. Without it, Pump.fun is a firehose.
+        const lastWarn = (s as any)._lastEmptySnipeWarnMs as number | undefined;
+        const now = Date.now();
+        if (!lastWarn || now - lastWarn > 60_000) {
+          (s as any)._lastEmptySnipeWarnMs = now;
+          pushSessionLog(cluster, s.owner, "warn", "Snipe list is empty. Add a Pump.fun mint to snipe list to trigger actions.");
+        }
+        continue;
+      }
+
       if (s.config.mode === "snipe" && snipeSet.size > 0) {
         try {
           const matches = await txMentionsAnyOfMints({ cluster, signature, mintSet: snipeSet });
@@ -148,6 +173,9 @@ export async function ensureClusterSubscription(cluster: Cluster) {
           continue;
         }
       }
+
+      // Only log cluster-level signals when they matter to at least one session.
+      pushClusterLog(cluster, "info", `${sourceKey} matched. sig=${signature}`);
 
       s.pendingAction = {
         type: "SIGN_AND_BUNDLE",

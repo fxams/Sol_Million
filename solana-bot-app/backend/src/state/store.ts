@@ -68,6 +68,7 @@ export type ClusterRuntime = {
   wsSubIdsByKey?: Map<string, number>;
   wsSubKeyById?: Map<number, string>;
   wsPendingReqIdToKey?: Map<number, string>;
+  seenSignatures?: Set<string>;
   clusterLogs: LogLine[];
   sessions: Map<string, WalletSession>; // owner -> session
 };
@@ -92,7 +93,8 @@ function makeRuntime(): ClusterRuntime {
     sessions: new Map(),
     wsSubIdsByKey: new Map(),
     wsSubKeyById: new Map(),
-    wsPendingReqIdToKey: new Map()
+    wsPendingReqIdToKey: new Map(),
+    seenSignatures: new Set()
   };
 }
 
