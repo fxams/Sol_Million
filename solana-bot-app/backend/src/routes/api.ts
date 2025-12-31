@@ -21,6 +21,7 @@ const ownerSchema = z.string().min(32).max(64);
 const configSchema = z.object({
   cluster: clusterSchema.default("mainnet-beta"),
   mode: z.enum(["snipe", "volume"]).default("snipe"),
+  pumpFunPhase: z.enum(["pre", "post"]).default("post"),
   mevEnabled: z.boolean().default(true),
   buyAmountSol: z.number().finite().positive().max(10_000),
   takeProfitPct: z.number().finite().min(0).max(10_000).default(0),
@@ -60,6 +61,7 @@ router.get("/status", async (req, res) => {
     owner: s.owner,
     running: s.running,
     mode: s.config?.mode ?? null,
+    pumpFunPhase: s.config?.pumpFunPhase ?? null,
     mevEnabled: s.config?.mevEnabled ?? null
   }));
 

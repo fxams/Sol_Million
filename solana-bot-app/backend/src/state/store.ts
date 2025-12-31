@@ -2,10 +2,17 @@ import type WebSocket from "ws";
 
 export type Cluster = "mainnet-beta" | "devnet";
 export type BotMode = "snipe" | "volume";
+export type PumpFunPhase = "pre" | "post";
 
 export type BotConfig = {
   cluster: Cluster;
   mode: BotMode;
+  /**
+   * When sniping Pump.fun mints you can choose:
+   * - "pre": pre-migration (bonding curve / Pump.fun program)
+   * - "post": post-migration (Raydium pool)
+   */
+  pumpFunPhase: PumpFunPhase;
   mevEnabled: boolean;
   buyAmountSol: number;
   takeProfitPct: number;
@@ -58,7 +65,9 @@ export type WalletSession = {
 
 export type ClusterRuntime = {
   ws?: WebSocket;
-  wsSubId?: number;
+  wsSubIdsByKey?: Map<string, number>;
+  wsSubKeyById?: Map<number, string>;
+  wsPendingReqIdToKey?: Map<number, string>;
   clusterLogs: LogLine[];
   sessions: Map<string, WalletSession>; // owner -> session
 };
@@ -78,7 +87,13 @@ function makeSession(owner: string): WalletSession {
 }
 
 function makeRuntime(): ClusterRuntime {
-  return { clusterLogs: [], sessions: new Map() };
+  return {
+    clusterLogs: [],
+    sessions: new Map(),
+    wsSubIdsByKey: new Map(),
+    wsSubKeyById: new Map(),
+    wsPendingReqIdToKey: new Map()
+  };
 }
 
 export const state: Record<Cluster, ClusterRuntime> = {

@@ -9,6 +9,7 @@ import clsx from "clsx";
 import { Buffer } from "buffer";
 
 type BotMode = "snipe" | "volume";
+type PumpFunPhase = "pre" | "post";
 
 type PendingAction =
   | {
@@ -37,7 +38,13 @@ type BotStatus = {
   logs: { ts: number; level: "info" | "warn" | "error"; msg: string }[];
   bundles: BundleStatus[];
   pendingAction: PendingAction;
-  sessions?: { owner: string; running: boolean; mode: BotMode | null; mevEnabled: boolean | null }[];
+  sessions?: {
+    owner: string;
+    running: boolean;
+    mode: BotMode | null;
+    pumpFunPhase: PumpFunPhase | null;
+    mevEnabled: boolean | null;
+  }[];
 };
 
 function getBackendBaseUrl() {
@@ -66,6 +73,7 @@ export function Dashboard() {
   const [loading, setLoading] = useState(false);
 
   const [mode, setMode] = useState<BotMode>("snipe");
+  const [pumpFunPhase, setPumpFunPhase] = useState<PumpFunPhase>("pre");
   const [mevEnabled, setMevEnabled] = useState(true);
   const [buyAmountSol, setBuyAmountSol] = useState("0.1");
   const [takeProfitPct, setTakeProfitPct] = useState("30");
@@ -87,6 +95,7 @@ export function Dashboard() {
     () => ({
       cluster,
       mode,
+      pumpFunPhase,
       mevEnabled,
       buyAmountSol: Number(buyAmountSol),
       takeProfitPct: Number(takeProfitPct),
@@ -101,6 +110,7 @@ export function Dashboard() {
     [
       cluster,
       mode,
+      pumpFunPhase,
       mevEnabled,
       buyAmountSol,
       takeProfitPct,
@@ -425,6 +435,19 @@ export function Dashboard() {
                   </button>
                 </div>
               </label>
+
+              <label className="flex flex-col gap-1 text-sm">
+                <span className="text-slate-300">Pump.fun snipe phase</span>
+                <select
+                  className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
+                  value={pumpFunPhase}
+                  onChange={(e) => setPumpFunPhase(e.target.value as PumpFunPhase)}
+                  disabled={loading || mode !== "snipe"}
+                >
+                  <option value="pre">Pre-migration (Pump.fun bonding curve)</option>
+                  <option value="post">Post-migration (Raydium)</option>
+                </select>
+              </label>
             </div>
 
             <div className="mt-4">
@@ -517,6 +540,7 @@ export function Dashboard() {
                         <tr>
                           <th className="px-3 py-2">Owner</th>
                           <th className="px-3 py-2">Mode</th>
+                          <th className="px-3 py-2">Phase</th>
                           <th className="px-3 py-2">MEV</th>
                           <th className="px-3 py-2">Running</th>
                         </tr>
@@ -531,6 +555,7 @@ export function Dashboard() {
                                 {s.owner}
                               </td>
                               <td className="px-3 py-2 text-slate-200">{s.mode ?? "-"}</td>
+                              <td className="px-3 py-2 text-slate-200">{s.pumpFunPhase ?? "-"}</td>
                               <td className="px-3 py-2 text-slate-200">
                                 {s.mevEnabled == null ? "-" : s.mevEnabled ? "on" : "off"}
                               </td>

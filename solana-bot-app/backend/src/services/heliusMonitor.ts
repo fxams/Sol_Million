@@ -1,12 +1,16 @@
 import WebSocket from "ws";
+import { Connection } from "@solana/web3.js";
 import { jito } from "./jito.js";
 import { buildUnsignedBuyLikeTxBase64, buildUnsignedJitoTipTxBase64, randomTipLamports } from "./txBuilder.js";
-import { getWsUrl } from "../utils/env.js";
+import { env, getRpcUrl, getWsUrl } from "../utils/env.js";
 import type { BotConfig, Cluster, WalletSession } from "../state/store.js";
 import { getOrCreateSession, pushClusterLog, pushSessionLog, state } from "../state/store.js";
 
 // Raydium AMM program ID (mainnet): required by spec.
 export const RAYDIUM_AMM_PROGRAM_ID = "675kPX9MHTjS2zt1qfr1NYHuzeLXfQM9H24wFSUt1dvX";
+export const PUMPFUN_PROGRAM_ID = env.pumpfunProgramId;
+
+type SourceKey = "raydium" | "pumpfun";
 
 type JsonRpcMsg = {
   jsonrpc?: string;
@@ -22,10 +26,48 @@ function looksLikeRaydiumPoolInit(logs: string[]) {
   return logs.some((l) => /initialize2|initialize/i.test(l));
 }
 
+function looksLikePumpfunTradeSignal(logs: string[]) {
+  // Heuristic only. Real Pump.fun parsing should read the transaction and decode instructions.
+  return logs.some((l) => /buy|sell|create|initialize/i.test(l));
+}
+
+async function txMentionsAnyOfMints(opts: {
+  cluster: Cluster;
+  signature: string;
+  mintSet: Set<string>;
+}): Promise<string[]> {
+  if (opts.mintSet.size === 0) return [];
+  const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
+  const tx = await connection.getTransaction(opts.signature, {
+    commitment: "confirmed",
+    maxSupportedTransactionVersion: 0
+  });
+  const keys = tx?.transaction.message.getAccountKeys().staticAccountKeys ?? [];
+  const matches: string[] = [];
+  for (const k of keys) {
+    const b58 = k.toBase58();
+    if (opts.mintSet.has(b58)) matches.push(b58);
+  }
+  return matches;
+}
+
 function anySessionsRunning(cluster: Cluster) {
   const runtime = state[cluster];
   for (const s of runtime.sessions.values()) if (s.running) return true;
   return false;
+}
+
+function subscribeLogs(runtime: any, ws: WebSocket, key: SourceKey, programId: string) {
+  const reqId = Date.now() + Math.floor(Math.random() * 1000);
+  runtime.wsPendingReqIdToKey?.set(reqId, key);
+  ws.send(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: reqId,
+      method: "logsSubscribe",
+      params: [{ mentions: [programId] }, { commitment: "processed" }]
+    })
+  );
 }
 
 export async function ensureClusterSubscription(cluster: Cluster) {
@@ -39,58 +81,97 @@ export async function ensureClusterSubscription(cluster: Cluster) {
   runtime.ws = ws;
 
   ws.on("open", () => {
-    pushClusterLog(cluster, "info", "WebSocket connected; subscribing to Raydium AMM logs...");
-    const subReq = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "logsSubscribe",
-      params: [{ mentions: [RAYDIUM_AMM_PROGRAM_ID] }, { commitment: "processed" }]
-    };
-    ws.send(JSON.stringify(subReq));
+    pushClusterLog(cluster, "info", "WebSocket connected; subscribing to Raydium + Pump.fun logs...");
+    subscribeLogs(runtime, ws, "raydium", RAYDIUM_AMM_PROGRAM_ID);
+    if (PUMPFUN_PROGRAM_ID) {
+      subscribeLogs(runtime, ws, "pumpfun", PUMPFUN_PROGRAM_ID);
+    } else {
+      pushClusterLog(cluster, "warn", "PUMPFUN_PROGRAM_ID not set; Pump.fun pre-migration sniping disabled.");
+    }
   });
 
   ws.on("message", async (data) => {
     const msg = JSON.parse(data.toString()) as JsonRpcMsg;
 
-    if (msg.id === 1 && msg.result) {
-      runtime.wsSubId = msg.result;
-      pushClusterLog(cluster, "info", `Subscribed. subscriptionId=${runtime.wsSubId}`);
-      return;
+    if (typeof msg.id === "number" && msg.result) {
+      const key = runtime.wsPendingReqIdToKey?.get(msg.id);
+      if (key) {
+        runtime.wsPendingReqIdToKey?.delete(msg.id);
+        runtime.wsSubIdsByKey?.set(key, msg.result);
+        runtime.wsSubKeyById?.set(msg.result, key);
+        pushClusterLog(cluster, "info", `Subscribed. key=${key} subscriptionId=${msg.result}`);
+        return;
+      }
     }
 
     if (msg.method !== "logsNotification") return;
 
+    const subId = msg.params?.subscription as number | undefined;
     const value = msg.params?.result?.value;
     const signature = value?.signature as string | undefined;
     const logs = (value?.logs as string[]) ?? [];
 
     if (!signature || logs.length === 0) return;
-    if (!looksLikeRaydiumPoolInit(logs)) return;
+    const sourceKey = (subId ? runtime.wsSubKeyById?.get(subId) : undefined) as SourceKey | undefined;
+    if (!sourceKey) return;
 
-    pushClusterLog(cluster, "info", `Raydium pool init signal. sig=${signature}`);
+    if (sourceKey === "raydium" && !looksLikeRaydiumPoolInit(logs)) return;
+    if (sourceKey === "pumpfun" && !looksLikePumpfunTradeSignal(logs)) return;
+
+    pushClusterLog(cluster, "info", `${sourceKey} signal. sig=${signature}`);
 
     // Fan out to each running wallet session (sniper/volume can be different wallets).
     for (const s of runtime.sessions.values()) {
       if (!s.running || !s.config) continue;
       if (s.pendingAction) continue; // one-at-a-time per wallet
 
-      // NOTE: Proper snipe list / mint filtering requires parsing the pool tx/accounts.
-      // This template sets a pending action as a safe prompt to sign when running.
+      // Route signals based on selected Pump.fun phase.
+      // - For "pre" we react to Pump.fun signals
+      // - For "post" we react to Raydium signals
+      if (s.config.mode === "snipe") {
+        if (s.config.pumpFunPhase === "pre" && sourceKey !== "pumpfun") continue;
+        if (s.config.pumpFunPhase === "post" && sourceKey !== "raydium") continue;
+      } else {
+        // volume/arb: keep Raydium-only in this template
+        if (sourceKey !== "raydium") continue;
+      }
+
+      // If a snipe list is provided, only trigger on matching mints.
+      const snipeSet = new Set((s.config.snipeList ?? []).map((x) => x.trim()).filter(Boolean));
+      if (s.config.mode === "snipe" && snipeSet.size > 0) {
+        try {
+          const matches = await txMentionsAnyOfMints({ cluster, signature, mintSet: snipeSet });
+          if (matches.length === 0) continue;
+          (s as any)._matchedMints = matches;
+        } catch (e: any) {
+          pushSessionLog(cluster, s.owner, "warn", `Mint filter check failed: ${e?.message ?? String(e)}`);
+          continue;
+        }
+      }
+
       s.pendingAction = {
         type: "SIGN_AND_BUNDLE",
-        reason: `[${s.config.mode}] Pool detected (${signature}). Click "Sign & submit pending bundle".`,
+        reason:
+          s.config.mode === "snipe"
+            ? `[snipe/${s.config.pumpFunPhase}] Target detected (${signature}). Click "Sign & submit pending bundle".`
+            : `[volume] Signal detected (${signature}). Click "Sign & submit pending bundle".`,
         unsignedTxsBase64: []
       };
-      (s.pendingAction as any).poolSignature = signature;
+      (s.pendingAction as any).triggerSignature = signature;
+      (s.pendingAction as any).source = sourceKey;
+      const matched = (s as any)._matchedMints as string[] | undefined;
+      if (matched?.length) (s.pendingAction as any).targetMint = matched[0];
       (s.pendingAction as any).needsUnsignedTxs = true;
-      pushSessionLog(cluster, s.owner, "info", `Pending action created for pool sig=${signature}`);
+      pushSessionLog(cluster, s.owner, "info", `Pending action created. source=${sourceKey} sig=${signature}`);
     }
   });
 
   ws.on("close", () => {
     pushClusterLog(cluster, "warn", "WebSocket closed");
     runtime.ws = undefined;
-    runtime.wsSubId = undefined;
+    runtime.wsSubIdsByKey?.clear();
+    runtime.wsSubKeyById?.clear();
+    runtime.wsPendingReqIdToKey?.clear();
   });
 
   ws.on("error", (err) => {
@@ -126,7 +207,9 @@ export async function stopWalletSession(cluster: Cluster, owner: string) {
         // ignore
       }
       runtime.ws = undefined;
-      runtime.wsSubId = undefined;
+      runtime.wsSubIdsByKey?.clear();
+      runtime.wsSubKeyById?.clear();
+      runtime.wsPendingReqIdToKey?.clear();
       pushClusterLog(cluster, "info", "Closed cluster WebSocket (no active sessions).");
     }
   }
@@ -147,7 +230,9 @@ export async function materializePendingUnsignedTxsForSession(opts: {
   if (!session.pendingAction || !pa?.needsUnsignedTxs) return null;
   if (!cfg) return null;
 
-  const poolSig = String(pa.poolSignature ?? "unknown");
+  const triggerSig = String(pa.triggerSignature ?? "unknown");
+  const source = String(pa.source ?? "unknown");
+  const targetMint = pa.targetMint ? String(pa.targetMint) : undefined;
 
   // NOTE:
   // - Proper liquidity filtering requires parsing pool accounts and reading reserves.
@@ -167,7 +252,7 @@ export async function materializePendingUnsignedTxsForSession(opts: {
     cluster: opts.cluster,
     owner: opts.owner,
     amountSol: cfg.buyAmountSol,
-    memo: `mode=${cfg.mode} raydium_pool_sig=${poolSig}`
+    memo: `mode=${cfg.mode} phase=${cfg.pumpFunPhase} source=${source} sig=${triggerSig}${targetMint ? ` mint=${targetMint}` : ""}`
   });
   unsigned.push(buyTx);
 
@@ -183,7 +268,7 @@ export async function materializePendingUnsignedTxsForSession(opts: {
         owner: opts.owner,
         tipAccount,
         tipLamports,
-        memo: `Jito tip | mode=${cfg.mode} | pool=${poolSig}`
+        memo: `Jito tip | mode=${cfg.mode} phase=${cfg.pumpFunPhase} source=${source}`
       });
       unsigned.push(tipTx);
     }

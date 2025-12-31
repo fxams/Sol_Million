@@ -18,6 +18,7 @@ export const env = {
   frontendOrigin: process.env.FRONTEND_ORIGIN ?? "http://localhost:3000",
   defaultCluster: (process.env.CLUSTER ?? "mainnet-beta") as Cluster,
   jitoBlockEngineUrl: optional("JITO_BLOCK_ENGINE_URL") ?? "https://mainnet.block-engine.jito.wtf",
+  pumpfunProgramId: optional("PUMPFUN_PROGRAM_ID"),
   heliusRpcUrl: optional("HELIUS_RPC_URL"),
   heliusWsUrl: optional("HELIUS_WS_URL"),
   heliusRpcUrlDevnet: optional("HELIUS_RPC_URL_DEVNET"),
