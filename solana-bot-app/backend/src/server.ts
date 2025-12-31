@@ -14,11 +14,22 @@ app.use(
   })
 );
 
-app.get("/health", (_req, res) => res.json({ ok: true }));
+app.get("/health", (_req, res) =>
+  res.json({
+    ok: true,
+    // These are safe to expose (not secrets). Useful for deployment debugging.
+    frontendOrigin: env.frontendOrigin,
+    pumpfunProgramId: env.pumpfunProgramId ?? null,
+    pumpfunProgramIdSet: Boolean(env.pumpfunProgramId),
+    jitoBlockEngineUrl: env.jitoBlockEngineUrl
+  })
+);
 app.use("/api", apiRouter);
 
 app.listen(env.port, () => {
   // eslint-disable-next-line no-console
   console.log(`Backend listening on http://localhost:${env.port}`);
+  // eslint-disable-next-line no-console
+  console.log(`PUMPFUN_PROGRAM_ID set: ${Boolean(env.pumpfunProgramId)}${env.pumpfunProgramId ? ` (${env.pumpfunProgramId})` : ""}`);
 });
 
