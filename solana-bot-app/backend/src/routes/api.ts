@@ -246,14 +246,17 @@ router.post("/prepare-bundle", async (req, res) => {
     const signedBytes = signedTxsBase64.map(base64ToBytes);
     const txs = signedBytes.map((b) => VersionedTransaction.deserialize(b));
 
-    // Enforce "tip tx last" for MEV protection.
-    const tipAccounts = new Set(await jito.getTipAccounts(cluster));
-    const lastTx = txs[txs.length - 1];
-    if (!isSystemTransferToTipAccount(lastTx, tipAccounts)) {
-      return res.status(400).json({
-        error:
-          "Last transaction must be a SystemProgram.transfer tip to a valid Jito tip account (tip tx must be last)."
-      });
+    // Tip tx is recommended but not strictly required.
+    // Under network congestion, Jito RPC can be globally rate limited (HTTP 429).
+    // We accept bundles without an explicit tip so the bot can keep operating.
+    try {
+      const tipAccounts = new Set(await jito.getTipAccounts(cluster));
+      const lastTx = txs[txs.length - 1];
+      if (!isSystemTransferToTipAccount(lastTx, tipAccounts)) {
+        pushSessionLog(cluster, owner, "warn", "No Jito tip tx detected as last tx; submitting bundle without explicit tip.");
+      }
+    } catch (e: any) {
+      pushSessionLog(cluster, owner, "warn", `Failed to validate Jito tip accounts; submitting bundle anyway. err=${e?.message ?? String(e)}`);
     }
 
     const encodedTransactionsBase58 = signedBytes.map(bytesToBase58);

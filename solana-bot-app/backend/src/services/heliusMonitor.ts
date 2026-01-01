@@ -752,26 +752,15 @@ export async function materializePendingUnsignedTxsForSession(opts: {
       unsigned.push(buyTxB64);
 
       if (cfg.volumeRoundtrip) {
-        // Best-effort: sell 100% (PumpPortal supports percent strings in many setups).
-        try {
-          const sellTxB64 = await pumpportalTradeTxBase64({
-            owner: opts.owner,
-            mint: tokenMint,
-            action: "sell",
-            amount: "100%",
-            denominatedInSol: false,
-            slippagePercent,
-            pool: usedRoute === "raydium" ? "raydium" : "pump"
-          });
-          unsigned.push(sellTxB64);
-        } catch (sellErr: any) {
-          pushSessionLog(
-            opts.cluster,
-            opts.owner,
-            "warn",
-            `Roundtrip sell failed; proceeding buy-only. err=${sellErr?.message ?? String(sellErr)}`
-          );
-        }
+        // PumpPortal builds sell txs by inspecting current wallet token balances.
+        // In a single-cycle "buy then sell" flow, that balance won't exist yet, so trade-local often fails.
+        // Degrade to buy-only when using PumpPortal routes.
+        pushSessionLog(
+          opts.cluster,
+          opts.owner,
+          "warn",
+          "Roundtrip is not supported for PumpPortal routes (balance unknown before buy). Proceeding buy-only."
+        );
       }
     }
 
@@ -790,17 +779,23 @@ export async function materializePendingUnsignedTxsForSession(opts: {
     if (opts.cluster === "devnet") {
       pushSessionLog(opts.cluster, opts.owner, "warn", "MEV enabled but cluster=devnet; skipping tip tx.");
     } else {
-      const tipAccounts = await jito.getTipAccounts(opts.cluster);
-      const tipAccount = tipAccounts[Math.floor(Math.random() * tipAccounts.length)];
-      const tipLamports = randomTipLamports(1000);
-      const tipTx = await buildUnsignedJitoTipTxBase64({
-        cluster: opts.cluster,
-        owner: opts.owner,
-        tipAccount,
-        tipLamports,
-        memo: `Jito tip | mode=${cfg.mode} phase=${cfg.pumpFunPhase} source=${source}`
-      });
-      unsigned.push(tipTx);
+      try {
+        const tipAccounts = await jito.getTipAccounts(opts.cluster);
+        const tipAccount = tipAccounts[Math.floor(Math.random() * tipAccounts.length)];
+        const tipLamports = randomTipLamports(1000);
+        const tipTx = await buildUnsignedJitoTipTxBase64({
+          cluster: opts.cluster,
+          owner: opts.owner,
+          tipAccount,
+          tipLamports,
+          memo: `Jito tip | mode=${cfg.mode} phase=${cfg.pumpFunPhase} source=${source}`
+        });
+        unsigned.push(tipTx);
+      } catch (e: any) {
+        // When Jito is globally rate-limited (HTTP 429), don't fail building swaps.
+        // We'll still attempt to submit a bundle without an explicit tip.
+        pushSessionLog(opts.cluster, opts.owner, "warn", `Jito tip unavailable; proceeding without tip. err=${e?.message ?? String(e)}`);
+      }
     }
   }
 
