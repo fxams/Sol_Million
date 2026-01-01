@@ -84,14 +84,22 @@ export async function pumpportalTradeTxBase64(opts: {
     throw new Error(`PumpPortal trade-local failed (${res.status} ${res.statusText})${suffix}`);
   }
 
-  const data = (await res.json().catch(() => null)) as PumpPortalTradeLocalResponse | null;
-  if (!data) throw new Error("PumpPortal trade-local returned empty response");
+  // PumpPortal sometimes returns JSON, but other times returns raw transaction bytes.
+  const ct = res.headers.get("content-type")?.toLowerCase() ?? "";
+  if (ct.includes("application/json")) {
+    const data = (await res.json().catch(() => null)) as PumpPortalTradeLocalResponse | null;
+    if (!data) throw new Error("PumpPortal trade-local returned empty JSON response");
 
-  if (typeof data === "string") return toBase64Tx(data);
-  if (data.error) throw new Error(`PumpPortal error: ${data.error}`);
+    if (typeof data === "string") return toBase64Tx(data);
+    if (data.error) throw new Error(`PumpPortal error: ${data.error}`);
 
-  const tx = data.transaction ?? data.tx ?? data.signedTransaction;
-  if (!tx) throw new Error(`PumpPortal response missing transaction: ${data.message ?? "unknown"}`);
-  return toBase64Tx(tx);
+    const tx = data.transaction ?? data.tx ?? data.signedTransaction;
+    if (!tx) throw new Error(`PumpPortal response missing transaction: ${data.message ?? "unknown"}`);
+    return toBase64Tx(tx);
+  }
+
+  const ab = await res.arrayBuffer().catch(() => null);
+  if (!ab || (ab as any).byteLength === 0) throw new Error(`PumpPortal trade-local returned empty response (ct=${ct || "unknown"})`);
+  return Buffer.from(new Uint8Array(ab)).toString("base64");
 }
 

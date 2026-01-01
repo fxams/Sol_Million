@@ -672,6 +672,7 @@ export async function materializePendingUnsignedTxsForSession(opts: {
     // - If Jupiter can quote it, assume "post-migration" (Raydium/DEX liquidity) and use Jupiter swaps.
     // - Otherwise, fall back to Pump.fun pre-migration via PumpPortal, and if that fails try Raydium pool via PumpPortal.
     let usedRoute: "jupiter" | "pumpfun" | "raydium" = "jupiter";
+    let jupiterErr: any = null;
     try {
       const buyQuote = await jupiterQuote({
         inputMint: WSOL_MINT,
@@ -701,6 +702,7 @@ export async function materializePendingUnsignedTxsForSession(opts: {
         unsigned.push(sellSwapTxB64);
       }
     } catch (e: any) {
+      jupiterErr = e;
       const slippagePercent = Math.max(0.1, cfg.volumeSlippageBps / 100); // bps -> %
       let buyTxB64: string | null = null;
       let lastErr: any = null;
@@ -741,7 +743,7 @@ export async function materializePendingUnsignedTxsForSession(opts: {
 
       if (!buyTxB64) {
         throw new Error(
-          `No swap route for mint=${tokenMint}. Jupiter quote failed; PumpPortal pump+raydium both failed. LastErr=${lastErr?.message ?? String(lastErr)}`
+          `No swap route for mint=${tokenMint}. JupiterErr=${jupiterErr?.message ?? String(jupiterErr)}; PumpPortal(pump+raydium) failed. LastErr=${lastErr?.message ?? String(lastErr)}`
         );
       }
       unsigned.push(buyTxB64);
