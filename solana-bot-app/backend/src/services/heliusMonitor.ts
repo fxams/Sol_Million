@@ -3,6 +3,7 @@ import { Connection, PublicKey } from "@solana/web3.js";
 import { jito } from "./jito.js";
 import { buildUnsignedBuyLikeTxBase64, buildUnsignedJitoTipTxBase64, randomTipLamports } from "./txBuilder.js";
 import { jupiterQuote, jupiterSwapTxBase64, WSOL_MINT } from "./jupiter.js";
+import { pumpportalTradeTxBase64 } from "./pumpportal.js";
 import { env, getRpcUrl, getWsUrl } from "../utils/env.js";
 import type { BotConfig, Cluster, WalletSession } from "../state/store.js";
 import { getOrCreateSession, pushClusterLog, pushSessionLog, state } from "../state/store.js";
@@ -667,33 +668,76 @@ export async function materializePendingUnsignedTxsForSession(opts: {
 
     const lamports = Math.max(1, Math.floor(cfg.buyAmountSol * 1e9));
 
-    const buyQuote = await jupiterQuote({
-      inputMint: WSOL_MINT,
-      outputMint: tokenMint,
-      amount: String(lamports),
-      slippageBps: cfg.volumeSlippageBps
-    });
-    const buySwapTxB64 = await jupiterSwapTxBase64({
-      quoteResponse: buyQuote,
-      userPublicKey: opts.owner,
-      wrapAndUnwrapSol: true
-    });
-    unsigned.push(buySwapTxB64);
-
-    if (cfg.volumeRoundtrip) {
-      const sellQuote = await jupiterQuote({
-        inputMint: tokenMint,
-        outputMint: WSOL_MINT,
-        amount: String(buyQuote.outAmount),
+    // Auto-route:
+    // - If Jupiter can quote it, assume "post-migration" (Raydium/DEX liquidity) and use Jupiter swaps.
+    // - Otherwise, fall back to Pump.fun pre-migration via PumpPortal.
+    let usedRoute: "jupiter" | "pumpfun" = "jupiter";
+    try {
+      const buyQuote = await jupiterQuote({
+        inputMint: WSOL_MINT,
+        outputMint: tokenMint,
+        amount: String(lamports),
         slippageBps: cfg.volumeSlippageBps
       });
-      const sellSwapTxB64 = await jupiterSwapTxBase64({
-        quoteResponse: sellQuote,
+      const buySwapTxB64 = await jupiterSwapTxBase64({
+        quoteResponse: buyQuote,
         userPublicKey: opts.owner,
         wrapAndUnwrapSol: true
       });
-      unsigned.push(sellSwapTxB64);
+      unsigned.push(buySwapTxB64);
+
+      if (cfg.volumeRoundtrip) {
+        const sellQuote = await jupiterQuote({
+          inputMint: tokenMint,
+          outputMint: WSOL_MINT,
+          amount: String(buyQuote.outAmount),
+          slippageBps: cfg.volumeSlippageBps
+        });
+        const sellSwapTxB64 = await jupiterSwapTxBase64({
+          quoteResponse: sellQuote,
+          userPublicKey: opts.owner,
+          wrapAndUnwrapSol: true
+        });
+        unsigned.push(sellSwapTxB64);
+      }
+    } catch (e: any) {
+      usedRoute = "pumpfun";
+      const slippagePercent = Math.max(0.1, cfg.volumeSlippageBps / 100); // bps -> %
+
+      const buyTxB64 = await pumpportalTradeTxBase64({
+        owner: opts.owner,
+        mint: tokenMint,
+        action: "buy",
+        amount: cfg.buyAmountSol,
+        denominatedInSol: true,
+        slippagePercent
+      });
+      unsigned.push(buyTxB64);
+
+      if (cfg.volumeRoundtrip) {
+        // Best-effort: sell 100% of acquired tokens (PumpPortal supports percent strings in many setups).
+        try {
+          const sellTxB64 = await pumpportalTradeTxBase64({
+            owner: opts.owner,
+            mint: tokenMint,
+            action: "sell",
+            amount: "100%",
+            denominatedInSol: false,
+            slippagePercent
+          });
+          unsigned.push(sellTxB64);
+        } catch (sellErr: any) {
+          pushSessionLog(
+            opts.cluster,
+            opts.owner,
+            "warn",
+            `Pump.fun roundtrip sell failed; proceeding buy-only. err=${sellErr?.message ?? String(sellErr)}`
+          );
+        }
+      }
     }
+
+    (session as any)._lastVolumeRoute = usedRoute;
   } else {
     const buyTx = await buildUnsignedBuyLikeTxBase64({
       cluster: opts.cluster,
@@ -747,8 +791,8 @@ function startVolumeLoop(cluster: Cluster, owner: string) {
     s.pendingAction = {
       type: "SIGN_AND_BUNDLE",
       reason: cfg.volumeRoundtrip
-        ? `[volume] Cycle ready: SOL→token→SOL. Click "Sign & execute".`
-        : `[volume] Cycle ready: SOL→token. Click "Sign & execute".`,
+        ? `[volume] Cycle ready (auto-route: Jupiter if possible, else Pump.fun): SOL→token→SOL. Click "Sign & execute".`
+        : `[volume] Cycle ready (auto-route: Jupiter if possible, else Pump.fun): SOL→token. Click "Sign & execute".`,
       unsignedTxsBase64: []
     };
     (s.pendingAction as any).triggerSignature = `volumeTimer:${Date.now()}`;

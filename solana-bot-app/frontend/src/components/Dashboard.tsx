@@ -703,7 +703,7 @@ export function Dashboard() {
                     disabled={loading}
                   />
                   <span className="text-xs text-slate-400">
-                    Default is USDC. Volume mode uses Jupiter routes (SOL→token, optionally token→SOL).
+                    Default is USDC. Volume mode auto-routes: Jupiter if tradable (post-migration), otherwise Pump.fun (pre-migration).
                   </span>
                 </label>
                 <label className="mt-3 flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
