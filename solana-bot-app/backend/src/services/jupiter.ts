@@ -1,6 +1,7 @@
 type QuoteResponse = {
   inputMint: string;
   outputMint: string;
+  // swap/v1 fields
   inAmount: string;
   outAmount: string;
   otherAmountThreshold?: string;
@@ -11,7 +12,9 @@ type QuoteResponse = {
 };
 
 function jupBase() {
-  return "https://quote-api.jup.ag/v6";
+  // The legacy `quote-api.jup.ag` hostname no longer resolves in some environments.
+  // `lite-api.jup.ag` provides public quote/swap endpoints under `/swap/v1`.
+  return "https://lite-api.jup.ag/swap/v1";
 }
 
 export const WSOL_MINT = "So11111111111111111111111111111111111111112";

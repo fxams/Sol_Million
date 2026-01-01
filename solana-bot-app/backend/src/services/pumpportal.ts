@@ -65,8 +65,9 @@ export async function pumpportalTradeTxBase64(opts: {
     mint: opts.mint,
     amount: opts.amount,
     denominatedInSol: opts.denominatedInSol,
-    // Some deployments expect integer percent; keep it compact + predictable.
-    slippage: Math.max(0.1, Math.round(opts.slippagePercent * 10) / 10),
+    // PumpPortal backends often parse this as an integer BigNumber, so avoid floats (e.g. 1.5).
+    // Interpret as percent; round up to be conservative.
+    slippage: Math.max(1, Math.ceil(opts.slippagePercent)),
     priorityFee: opts.priorityFeeSol ?? 0,
     pool: opts.pool ?? "pump"
   };
