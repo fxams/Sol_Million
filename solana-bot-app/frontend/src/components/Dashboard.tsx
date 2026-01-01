@@ -264,19 +264,41 @@ export function Dashboard() {
 
   useEffect(() => {
     let t: ReturnType<typeof setInterval> | undefined;
-    (async () => {
+    let stopped = false;
+    let inFlight = false;
+    const intervalMs = 3000;
+
+    const tick = async () => {
+      if (stopped) return;
+      if (document.visibilityState === "hidden") return;
+      if (inFlight) return;
+      inFlight = true;
       try {
         await fetchStatus();
-      } catch (e) {
-        // don't spam toasts; just keep last known UI.
+      } catch {
+        // keep last known UI
+      } finally {
+        inFlight = false;
       }
+    };
+
+    const onVis = () => {
+      // refresh immediately when user returns
+      if (document.visibilityState !== "hidden") tick().catch(() => {});
+    };
+
+    (async () => {
+      await tick();
       t = setInterval(() => {
-        fetchStatus().catch(() => {});
-      }, 1500);
+        tick().catch(() => {});
+      }, intervalMs);
     })();
     return () => {
+      stopped = true;
       if (t) clearInterval(t);
+      document.removeEventListener("visibilitychange", onVis);
     };
+    document.addEventListener("visibilitychange", onVis);
   }, [fetchStatus]);
 
   useEffect(() => {

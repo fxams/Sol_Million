@@ -593,7 +593,10 @@ export async function startWalletSession(owner: string, config: BotConfig) {
   session.epoch += 1;
 
   pushSessionLog(cluster, owner, "info", `Session started. mode=${config.mode} mev=${config.mevEnabled}`);
-  await ensureClusterSubscription(cluster);
+  // Volume mode is timer-driven; it doesn't need Helius WS subscriptions (reduces rate limits/cost).
+  if (config.mode === "snipe") {
+    await ensureClusterSubscription(cluster);
+  }
 
   if (config.mode === "volume") {
     startVolumeLoop(cluster, owner);
