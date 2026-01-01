@@ -42,6 +42,7 @@ export async function pumpportalTradeTxBase64(opts: {
   owner: string; // base58 pubkey
   mint: string; // token mint
   action: "buy" | "sell";
+  pool?: "pump" | "raydium";
   /**
    * PumpPortal expects:
    * - buy: amount in SOL (number) when denominatedInSol=true
@@ -64,10 +65,10 @@ export async function pumpportalTradeTxBase64(opts: {
     mint: opts.mint,
     amount: opts.amount,
     denominatedInSol: opts.denominatedInSol,
-    slippage: opts.slippagePercent,
+    // Some deployments expect integer percent; keep it compact + predictable.
+    slippage: Math.max(0.1, Math.round(opts.slippagePercent * 10) / 10),
     priorityFee: opts.priorityFeeSol ?? 0,
-    // Explicitly choose pump.fun pool path (pre-migration).
-    pool: "pump"
+    pool: opts.pool ?? "pump"
   };
 
   const res = await fetch(pumpportalUrl(), {
@@ -78,7 +79,8 @@ export async function pumpportalTradeTxBase64(opts: {
 
   if (!res.ok) {
     const txt = await res.text().catch(() => "");
-    throw new Error(`PumpPortal trade-local failed (${res.status}): ${txt.slice(0, 200)}`);
+    const suffix = txt ? `: ${txt.slice(0, 400)}` : "";
+    throw new Error(`PumpPortal trade-local failed (${res.status} ${res.statusText})${suffix}`);
   }
 
   const data = (await res.json().catch(() => null)) as PumpPortalTradeLocalResponse | null;

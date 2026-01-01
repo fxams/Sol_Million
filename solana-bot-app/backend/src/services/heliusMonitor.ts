@@ -650,7 +650,7 @@ export async function materializePendingUnsignedTxsForSession(opts: {
   // NOTE:
   // - Proper liquidity filtering requires parsing pool accounts and reading reserves.
   // - Replace txBuilder with real Raydium swap instructions in production.
-  if (cfg.minLiquiditySol > 0) {
+  if (cfg.mode !== "volume" && cfg.minLiquiditySol > 0) {
     pushSessionLog(
       opts.cluster,
       opts.owner,
@@ -670,8 +670,8 @@ export async function materializePendingUnsignedTxsForSession(opts: {
 
     // Auto-route:
     // - If Jupiter can quote it, assume "post-migration" (Raydium/DEX liquidity) and use Jupiter swaps.
-    // - Otherwise, fall back to Pump.fun pre-migration via PumpPortal.
-    let usedRoute: "jupiter" | "pumpfun" = "jupiter";
+    // - Otherwise, fall back to Pump.fun pre-migration via PumpPortal, and if that fails try Raydium pool via PumpPortal.
+    let usedRoute: "jupiter" | "pumpfun" | "raydium" = "jupiter";
     try {
       const buyQuote = await jupiterQuote({
         inputMint: WSOL_MINT,
@@ -701,21 +701,53 @@ export async function materializePendingUnsignedTxsForSession(opts: {
         unsigned.push(sellSwapTxB64);
       }
     } catch (e: any) {
-      usedRoute = "pumpfun";
       const slippagePercent = Math.max(0.1, cfg.volumeSlippageBps / 100); // bps -> %
+      let buyTxB64: string | null = null;
+      let lastErr: any = null;
 
-      const buyTxB64 = await pumpportalTradeTxBase64({
-        owner: opts.owner,
-        mint: tokenMint,
-        action: "buy",
-        amount: cfg.buyAmountSol,
-        denominatedInSol: true,
-        slippagePercent
-      });
+      // 1) Pump.fun pool (pre-migration)
+      try {
+        usedRoute = "pumpfun";
+        buyTxB64 = await pumpportalTradeTxBase64({
+          owner: opts.owner,
+          mint: tokenMint,
+          action: "buy",
+          amount: cfg.buyAmountSol,
+          denominatedInSol: true,
+          slippagePercent,
+          pool: "pump"
+        });
+      } catch (pumpErr: any) {
+        lastErr = pumpErr;
+      }
+
+      // 2) Raydium pool (post-migration) via PumpPortal (covers "migrated but not on Jupiter" cases)
+      if (!buyTxB64) {
+        try {
+          usedRoute = "raydium";
+          buyTxB64 = await pumpportalTradeTxBase64({
+            owner: opts.owner,
+            mint: tokenMint,
+            action: "buy",
+            amount: cfg.buyAmountSol,
+            denominatedInSol: true,
+            slippagePercent,
+            pool: "raydium"
+          });
+        } catch (rayErr: any) {
+          lastErr = rayErr;
+        }
+      }
+
+      if (!buyTxB64) {
+        throw new Error(
+          `No swap route for mint=${tokenMint}. Jupiter quote failed; PumpPortal pump+raydium both failed. LastErr=${lastErr?.message ?? String(lastErr)}`
+        );
+      }
       unsigned.push(buyTxB64);
 
       if (cfg.volumeRoundtrip) {
-        // Best-effort: sell 100% of acquired tokens (PumpPortal supports percent strings in many setups).
+        // Best-effort: sell 100% (PumpPortal supports percent strings in many setups).
         try {
           const sellTxB64 = await pumpportalTradeTxBase64({
             owner: opts.owner,
@@ -723,7 +755,8 @@ export async function materializePendingUnsignedTxsForSession(opts: {
             action: "sell",
             amount: "100%",
             denominatedInSol: false,
-            slippagePercent
+            slippagePercent,
+            pool: usedRoute === "raydium" ? "raydium" : "pump"
           });
           unsigned.push(sellTxB64);
         } catch (sellErr: any) {
@@ -731,7 +764,7 @@ export async function materializePendingUnsignedTxsForSession(opts: {
             opts.cluster,
             opts.owner,
             "warn",
-            `Pump.fun roundtrip sell failed; proceeding buy-only. err=${sellErr?.message ?? String(sellErr)}`
+            `Roundtrip sell failed; proceeding buy-only. err=${sellErr?.message ?? String(sellErr)}`
           );
         }
       }
