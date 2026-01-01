@@ -31,7 +31,7 @@ const configSchema = z.object({
       minUniqueFeePayersInWindow: z.number().int().min(1).max(100).default(3),
       requireMintAuthorityDisabled: z.boolean().default(true),
       requireFreezeAuthorityDisabled: z.boolean().default(true),
-      allowToken2022: z.boolean().default(false),
+      allowToken2022: z.boolean().default(true),
       maxTop1HolderPct: z.number().finite().min(0).max(100).default(20),
       maxTop10HolderPct: z.number().finite().min(0).max(100).default(60)
     })

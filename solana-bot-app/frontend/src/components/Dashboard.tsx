@@ -85,7 +85,7 @@ export function Dashboard() {
   const [autoMinUniquePayers, setAutoMinUniquePayers] = useState("3");
   const [autoMaxTop1Pct, setAutoMaxTop1Pct] = useState("20");
   const [autoMaxTop10Pct, setAutoMaxTop10Pct] = useState("60");
-  const [autoAllowToken2022, setAutoAllowToken2022] = useState(false);
+  const [autoAllowToken2022, setAutoAllowToken2022] = useState(true);
   const [mevEnabled, setMevEnabled] = useState(true);
   const [buyAmountSol, setBuyAmountSol] = useState("0.1");
   const [takeProfitPct, setTakeProfitPct] = useState("30");
@@ -604,7 +604,7 @@ export function Dashboard() {
                         </label>
                       </div>
                       <label className="mt-3 flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900 px-3 py-2">
-                        <span className="text-slate-200">Allow Token-2022 mints (riskier)</span>
+                        <span className="text-slate-200">Allow Token-2022 mints (recommended)</span>
                         <input
                           type="checkbox"
                           checked={autoAllowToken2022}

@@ -126,6 +126,29 @@ function parseMintAccount(data: Buffer) {
   return { mintAuthorityOption, freezeAuthorityOption, supply, decimals, isInitialized };
 }
 
+function parseToken2022ExtensionTypes(data: Buffer): number[] {
+  // Best-effort TLV parse for Token-2022 mint accounts:
+  // [u16 type][u16 length][length bytes]... until exhausted.
+  // If the layout differs, fail open (return []).
+  if (data.length <= 82) return [];
+  const types: number[] = [];
+  let off = 82;
+  while (off + 4 <= data.length) {
+    const type = data.readUInt16LE(off);
+    const len = data.readUInt16LE(off + 2);
+    off += 4;
+    if (off + len > data.length) break;
+    types.push(type);
+    off += len;
+  }
+  return types;
+}
+
+function isCreateLikePumpfunLogs(logs: string[]) {
+  // Helius log lines often look like: "Program log: Instruction: Create"
+  return logs.some((l) => /instruction:\s*create/i.test(l) || /\bcreate\b/i.test(l));
+}
+
 async function inferMintFromPumpfunTx(opts: { cluster: Cluster; signature: string }) {
   const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
   const tx = await getTransactionFast(connection, opts.cluster, opts.signature);
@@ -186,6 +209,23 @@ async function checkMintSafety(opts: {
   const isToken = acc.owner.equals(TOKEN_PROGRAM_ID);
   if (!isToken && !is2022) return { ok: false, reason: "not a token mint account" };
   if (is2022 && !opts.cfg.allowToken2022) return { ok: false, reason: "token-2022 not allowed" };
+
+  if (is2022) {
+    // Block risky Token-2022 extensions (best-effort).
+    const extTypes = parseToken2022ExtensionTypes(Buffer.from(acc.data));
+    // Common risky extensions (enum values may vary; this is a practical blocklist).
+    const blocked = new Set<number>([
+      1, // TransferFeeConfig
+      4, // ConfidentialTransferMint
+      10, // InterestBearingConfig
+      12, // PermanentDelegate
+      14, // TransferHook
+      16 // ConfidentialTransferFeeConfig
+    ]);
+    for (const t of extTypes) {
+      if (blocked.has(t)) return { ok: false, reason: `token-2022 blocked extension ${t}` };
+    }
+  }
 
   const parsed = parseMintAccount(Buffer.from(acc.data));
   if (!parsed?.isInitialized) return { ok: false, reason: "mint not initialized" };
@@ -388,6 +428,7 @@ export async function ensureClusterSubscription(cluster: Cluster) {
         stats.totalSignals += 1;
 
         try {
+          const isCreate = isCreateLikePumpfunLogs(logs);
           const inferred = await inferMintFromPumpfunTx({ cluster, signature });
           if (!s.running || s.config !== cfg || s.epoch !== epoch) continue;
           const mint = inferred?.mint;
@@ -400,21 +441,39 @@ export async function ensureClusterSubscription(cluster: Cluster) {
           stats.mintInferred += 1;
 
           const now = Date.now();
-          const bt = tx.blockTime ? tx.blockTime * 1000 : now;
-          const ageSec = Math.floor((now - bt) / 1000);
-          if (ageSec > cfg.autoSnipe.maxTxAgeSec) {
-            stats.rejects.tooOld = (stats.rejects.tooOld ?? 0) + 1;
-            continue;
-          }
 
           // Per-session momentum tracking
           const mintStats: Map<string, any> = (s as any)._autoMintStats ?? new Map();
           (s as any)._autoMintStats = mintStats;
 
           let st = mintStats.get(mint);
-          if (!st || now - st.firstSeenMs > cfg.autoSnipe.windowSec * 1000) {
-            st = { firstSeenMs: now, count: 0, payers: new Set<string>(), safety: null };
+          if (!st) {
+            // Only start tracking a mint when we see a create-like signal,
+            // otherwise we'd “discover” old tokens after a restart.
+            if (!isCreate) {
+              stats.rejects.notNew = (stats.rejects.notNew ?? 0) + 1;
+              continue;
+            }
+            st = { firstSeenMs: now, createdAtMs: now, count: 0, payers: new Set<string>(), safety: null };
             mintStats.set(mint, st);
+          } else if (now - st.firstSeenMs > cfg.autoSnipe.windowSec * 1000) {
+            // Window expired; only reset if we see a create-like signal again.
+            if (!isCreate) {
+              stats.rejects.windowExpired = (stats.rejects.windowExpired ?? 0) + 1;
+              continue;
+            }
+            st.firstSeenMs = now;
+            st.createdAtMs = now;
+            st.count = 0;
+            st.payers = new Set<string>();
+            st.safety = null;
+          }
+
+          const createdAtMs = Number(st.createdAtMs ?? st.firstSeenMs ?? now);
+          const ageSec = Math.floor((now - createdAtMs) / 1000);
+          if (ageSec > cfg.autoSnipe.maxTxAgeSec) {
+            stats.rejects.tooOld = (stats.rejects.tooOld ?? 0) + 1;
+            continue;
           }
 
           st.count += 1;
