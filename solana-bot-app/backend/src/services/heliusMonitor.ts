@@ -149,6 +149,17 @@ function isCreateLikePumpfunLogs(logs: string[]) {
   return logs.some((l) => /instruction:\s*create/i.test(l) || /\bcreate\b/i.test(l));
 }
 
+function isMintNewInTx(tx: any, mint: string) {
+  // Stronger heuristic than log text:
+  // if a mint shows up in postTokenBalances but not preTokenBalances,
+  // this tx likely corresponds to mint creation / first relevant activity.
+  const pre = new Set<string>();
+  const post = new Set<string>();
+  for (const b of tx?.meta?.preTokenBalances ?? []) if (b?.mint) pre.add(b.mint);
+  for (const b of tx?.meta?.postTokenBalances ?? []) if (b?.mint) post.add(b.mint);
+  return post.has(mint) && !pre.has(mint);
+}
+
 async function inferMintFromPumpfunTx(opts: { cluster: Cluster; signature: string }) {
   const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
   const tx = await getTransactionFast(connection, opts.cluster, opts.signature);
@@ -261,12 +272,21 @@ async function checkMintSafety(opts: {
   const amounts = largest.value.map((a) => BigInt(a.amount));
   const top1 = amounts[0] ?? 0n;
   const top10 = amounts.slice(0, 10).reduce((s, x) => s + x, 0n);
+  const nonZeroHolders = amounts.filter((a) => a > 0n).length;
 
   const top1Pct = Number((top1 * 10_000n) / supply) / 100;
   const top10Pct = Number((top10 * 10_000n) / supply) / 100;
 
-  if (top1Pct > opts.cfg.maxTop1HolderPct) return { ok: false, reason: `top1 too high (${top1Pct}%)`, top1Pct, top10Pct };
-  if (top10Pct > opts.cfg.maxTop10HolderPct) return { ok: false, reason: `top10 too high (${top10Pct}%)`, top1Pct, top10Pct };
+  // On Pump.fun bonding curve launches, distribution is extremely concentrated at the very start.
+  // Only enforce holder concentration caps once there are enough non-zero holders to make it meaningful.
+  if (nonZeroHolders >= 5) {
+    if (top1Pct > opts.cfg.maxTop1HolderPct) {
+      return { ok: false, reason: `top1 too high (${top1Pct}%)`, top1Pct, top10Pct };
+    }
+    if (top10Pct > opts.cfg.maxTop10HolderPct) {
+      return { ok: false, reason: `top10 too high (${top10Pct}%)`, top1Pct, top10Pct };
+    }
+  }
 
   return { ok: true, top1Pct, top10Pct };
 }
@@ -428,7 +448,7 @@ export async function ensureClusterSubscription(cluster: Cluster) {
         stats.totalSignals += 1;
 
         try {
-          const isCreate = isCreateLikePumpfunLogs(logs);
+          const isCreateFromLogs = isCreateLikePumpfunLogs(logs);
           const inferred = await inferMintFromPumpfunTx({ cluster, signature });
           if (!s.running || s.config !== cfg || s.epoch !== epoch) continue;
           const mint = inferred?.mint;
@@ -437,6 +457,7 @@ export async function ensureClusterSubscription(cluster: Cluster) {
             stats.rejects.noMint = (stats.rejects.noMint ?? 0) + 1;
             continue;
           }
+          const isCreate = isCreateFromLogs || isMintNewInTx(tx, mint);
           stats.txOk += 1;
           stats.mintInferred += 1;
 
