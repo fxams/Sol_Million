@@ -51,6 +51,37 @@ type BotStatus = {
   }[];
 };
 
+function CollapsibleCard(props: {
+  title: string;
+  defaultOpen?: boolean;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <details
+      className={clsx(
+        "group rounded-xl border border-slate-800 bg-slate-900/50",
+        "open:shadow-[0_0_0_1px_rgba(148,163,184,0.08)]"
+      )}
+      open={props.defaultOpen ?? false}
+    >
+      <summary
+        className={clsx(
+          "flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3",
+          "select-none [&::-webkit-details-marker]:hidden"
+        )}
+      >
+        <div className="flex items-center gap-2">
+          <span className="text-slate-400 transition-transform group-open:rotate-90">›</span>
+          <div className="text-base font-semibold text-slate-100">{props.title}</div>
+        </div>
+        <div className="shrink-0">{props.right}</div>
+      </summary>
+      <div className="px-4 pb-4 pt-1">{props.children}</div>
+    </details>
+  );
+}
+
 function getBackendBaseUrl() {
   return (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8787").replace(/\/$/, "");
 }
@@ -426,15 +457,15 @@ export function Dashboard() {
 
   return (
     <main className="min-h-screen">
-      <div className="mx-auto max-w-6xl px-4 py-8">
-        <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+      <div className="mx-auto max-w-6xl px-3 py-5 sm:px-4 sm:py-8">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <div className="text-2xl font-semibold tracking-tight">Solana Bot App</div>
-            <div className="text-sm text-slate-300">
+            <div className="text-xl font-semibold tracking-tight sm:text-2xl">Solana Bot App</div>
+            <div className="text-xs text-slate-300 sm:text-sm">
               Client-signed trades + optional MEV protection via Jito bundles
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             <select
               className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm"
               value={cluster}
@@ -449,21 +480,22 @@ export function Dashboard() {
           </div>
         </div>
 
-        <div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-2">
-          <section className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
-            <div className="flex items-center justify-between">
-              <div className="text-lg font-semibold">Bot configuration</div>
+        <div className="mt-5 grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
+          <CollapsibleCard
+            title="Bot configuration"
+            defaultOpen
+            right={
               <div
                 className={clsx(
-                  "rounded-full px-3 py-1 text-xs font-medium",
+                  "rounded-full px-2.5 py-1 text-[11px] font-medium",
                   running ? "bg-emerald-900/40 text-emerald-200" : "bg-slate-800 text-slate-200"
                 )}
               >
                 {running ? "RUNNING" : "STOPPED"}
               </div>
-            </div>
-
-            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            }
+          >
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="flex flex-col gap-1 text-sm">
                 <span className="text-slate-300">Buy amount (SOL)</span>
                 <input
@@ -575,78 +607,85 @@ export function Dashboard() {
                   </label>
 
                   {snipeTargetMode === "auto" && (
-                    <div className="rounded-lg border border-slate-800 bg-slate-950 p-3 text-xs text-slate-200 sm:col-span-2">
-                      <div className="font-semibold text-slate-100">Auto-snipe filters (recommended defaults)</div>
-                      <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
-                        <label className="flex flex-col gap-1">
-                          <span className="text-slate-400">Max tx age (sec)</span>
+                    <details className="group rounded-lg border border-slate-800 bg-slate-950 sm:col-span-2">
+                      <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-xs text-slate-200 [&::-webkit-details-marker]:hidden">
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-500 transition-transform group-open:rotate-90">›</span>
+                          <span className="font-semibold text-slate-100">Auto-snipe filters</span>
+                        </div>
+                        <span className="text-slate-400">advanced</span>
+                      </summary>
+                      <div className="px-3 pb-3 pt-1 text-xs text-slate-200">
+                        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
+                          <label className="flex flex-col gap-1">
+                            <span className="text-slate-400">Max tx age (sec)</span>
+                            <input
+                              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                              value={autoMaxTxAgeSec}
+                              onChange={(e) => setAutoMaxTxAgeSec(e.target.value)}
+                              inputMode="numeric"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-slate-400">Window (sec)</span>
+                            <input
+                              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                              value={autoWindowSec}
+                              onChange={(e) => setAutoWindowSec(e.target.value)}
+                              inputMode="numeric"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-slate-400">Min signals</span>
+                            <input
+                              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                              value={autoMinSignals}
+                              onChange={(e) => setAutoMinSignals(e.target.value)}
+                              inputMode="numeric"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-slate-400">Min unique payers</span>
+                            <input
+                              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                              value={autoMinUniquePayers}
+                              onChange={(e) => setAutoMinUniquePayers(e.target.value)}
+                              inputMode="numeric"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-slate-400">Max top1 %</span>
+                            <input
+                              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                              value={autoMaxTop1Pct}
+                              onChange={(e) => setAutoMaxTop1Pct(e.target.value)}
+                              inputMode="decimal"
+                            />
+                          </label>
+                          <label className="flex flex-col gap-1">
+                            <span className="text-slate-400">Max top10 %</span>
+                            <input
+                              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                              value={autoMaxTop10Pct}
+                              onChange={(e) => setAutoMaxTop10Pct(e.target.value)}
+                              inputMode="decimal"
+                            />
+                          </label>
+                        </div>
+                        <label className="mt-3 flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900 px-3 py-2">
+                          <span className="text-slate-200">Allow Token-2022 mints (recommended)</span>
                           <input
-                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
-                            value={autoMaxTxAgeSec}
-                            onChange={(e) => setAutoMaxTxAgeSec(e.target.value)}
-                            inputMode="numeric"
+                            type="checkbox"
+                            checked={autoAllowToken2022}
+                            onChange={(e) => setAutoAllowToken2022(e.target.checked)}
+                            disabled={loading}
                           />
                         </label>
-                        <label className="flex flex-col gap-1">
-                          <span className="text-slate-400">Window (sec)</span>
-                          <input
-                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
-                            value={autoWindowSec}
-                            onChange={(e) => setAutoWindowSec(e.target.value)}
-                            inputMode="numeric"
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span className="text-slate-400">Min signals</span>
-                          <input
-                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
-                            value={autoMinSignals}
-                            onChange={(e) => setAutoMinSignals(e.target.value)}
-                            inputMode="numeric"
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span className="text-slate-400">Min unique payers</span>
-                          <input
-                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
-                            value={autoMinUniquePayers}
-                            onChange={(e) => setAutoMinUniquePayers(e.target.value)}
-                            inputMode="numeric"
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span className="text-slate-400">Max top1 %</span>
-                          <input
-                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
-                            value={autoMaxTop1Pct}
-                            onChange={(e) => setAutoMaxTop1Pct(e.target.value)}
-                            inputMode="decimal"
-                          />
-                        </label>
-                        <label className="flex flex-col gap-1">
-                          <span className="text-slate-400">Max top10 %</span>
-                          <input
-                            className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
-                            value={autoMaxTop10Pct}
-                            onChange={(e) => setAutoMaxTop10Pct(e.target.value)}
-                            inputMode="decimal"
-                          />
-                        </label>
+                        <div className="mt-2 text-slate-400">
+                          Auto mode only triggers when a mint passes safety checks and shows enough early momentum.
+                        </div>
                       </div>
-                      <label className="mt-3 flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900 px-3 py-2">
-                        <span className="text-slate-200">Allow Token-2022 mints (recommended)</span>
-                        <input
-                          type="checkbox"
-                          checked={autoAllowToken2022}
-                          onChange={(e) => setAutoAllowToken2022(e.target.checked)}
-                          disabled={loading}
-                        />
-                      </label>
-                      <div className="mt-2 text-slate-400">
-                        Auto mode only triggers when a mint passes safety checks (mint+freeze authority disabled,
-                        holder concentration caps) and shows enough early momentum.
-                      </div>
-                    </div>
+                    </details>
                   )}
                 </>
               )}
@@ -670,9 +709,16 @@ export function Dashboard() {
             </div>
 
             {mode === "volume" && (
-              <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-3">
-                <div className="text-sm font-semibold text-slate-200">Volume settings</div>
-                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <details className="group mt-4 rounded-lg border border-slate-800 bg-slate-950">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm text-slate-200 [&::-webkit-details-marker]:hidden">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-500 transition-transform group-open:rotate-90">›</span>
+                    <span className="font-semibold text-slate-200">Volume settings</span>
+                  </div>
+                  <span className="text-xs text-slate-400">advanced</span>
+                </summary>
+                <div className="px-3 pb-3 pt-1">
+                  <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-2">
                   <label className="flex flex-col gap-1 text-sm">
                     <span className="text-slate-300">Interval (sec)</span>
                     <input
@@ -724,28 +770,40 @@ export function Dashboard() {
                     disabled={loading}
                   />
                 </label>
-              </div>
+                </div>
+              </details>
             )}
 
             <div className="mt-4">
-              <label className="flex flex-col gap-1 text-sm">
-                <span className="text-slate-300">Optional snipe list (token mints)</span>
-                <textarea
-                  className="min-h-[110px] rounded-md border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs"
-                  placeholder="Mint addresses, separated by commas/spaces/newlines"
-                  value={snipeList}
-                  onChange={(e) => setSnipeList(e.target.value)}
-                  disabled={mode === "snipe" && pumpFunPhase === "pre" && snipeTargetMode === "auto"}
-                />
-              </label>
-              {mode === "snipe" && pumpFunPhase === "pre" && snipeTargetMode === "auto" && (
-                <div className="mt-2 text-xs text-slate-400">
-                  Auto mode ignores the snipe list and discovers targets automatically.
+              <details className="group rounded-lg border border-slate-800 bg-slate-950">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm text-slate-200 [&::-webkit-details-marker]:hidden">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-500 transition-transform group-open:rotate-90">›</span>
+                    <span className="font-semibold text-slate-200">Snipe list</span>
+                  </div>
+                  <span className="text-xs text-slate-400">optional</span>
+                </summary>
+                <div className="px-3 pb-3 pt-1">
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span className="text-slate-300">Token mints</span>
+                    <textarea
+                      className="min-h-[96px] rounded-md border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs"
+                      placeholder="Mint addresses, separated by commas/spaces/newlines"
+                      value={snipeList}
+                      onChange={(e) => setSnipeList(e.target.value)}
+                      disabled={mode === "snipe" && pumpFunPhase === "pre" && snipeTargetMode === "auto"}
+                    />
+                  </label>
+                  {mode === "snipe" && pumpFunPhase === "pre" && snipeTargetMode === "auto" && (
+                    <div className="mt-2 text-xs text-slate-400">
+                      Auto mode ignores the snipe list and discovers targets automatically.
+                    </div>
+                  )}
                 </div>
-              )}
+              </details>
             </div>
 
-            <div className="mt-5 flex flex-wrap gap-2">
+            <div className="mt-4 flex flex-wrap gap-2">
               {!running ? (
                 <button
                   className="rounded-md bg-emerald-600 px-4 py-2 text-sm font-semibold text-slate-950 disabled:opacity-60"
@@ -795,67 +853,81 @@ export function Dashboard() {
             )}
 
             <div className="mt-5">
-              <div className="text-sm font-semibold text-slate-200">Backend wallet sessions</div>
-              <div className="mt-2 rounded-lg border border-slate-800 bg-slate-950">
-                <div className="max-h-[160px] overflow-auto">
-                  {(sessions ?? []).length === 0 ? (
-                    <div className="px-3 py-3 text-xs text-slate-500">No active sessions.</div>
-                  ) : (
-                    <table className="min-w-full text-left text-xs">
-                      <thead className="border-b border-slate-800 text-slate-400">
-                        <tr>
-                          <th className="px-3 py-2">Owner</th>
-                          <th className="px-3 py-2">Mode</th>
-                          <th className="px-3 py-2">Phase</th>
-                          <th className="px-3 py-2">MEV</th>
-                          <th className="px-3 py-2">Running</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {(sessions ?? []).map((s) => {
-                          const isMe = wallet.publicKey?.toBase58() === s.owner;
-                          return (
-                            <tr key={s.owner} className="border-b border-slate-900">
-                              <td className="px-3 py-2 font-mono text-[11px] text-slate-200">
-                                {isMe ? <span className="text-emerald-300">● </span> : null}
-                                {s.owner}
-                              </td>
-                              <td className="px-3 py-2 text-slate-200">{s.mode ?? "-"}</td>
-                              <td className="px-3 py-2 text-slate-200">{s.pumpFunPhase ?? "-"}</td>
-                              <td className="px-3 py-2 text-slate-200">
-                                {s.mevEnabled == null ? "-" : s.mevEnabled ? "on" : "off"}
-                              </td>
-                              <td className="px-3 py-2 text-slate-200">{s.running ? "yes" : "no"}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  )}
+              <details className="group rounded-lg border border-slate-800 bg-slate-950">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm text-slate-200 [&::-webkit-details-marker]:hidden">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-500 transition-transform group-open:rotate-90">›</span>
+                    <span className="font-semibold text-slate-200">Backend wallet sessions</span>
+                  </div>
+                  <span className="text-xs text-slate-400">{(sessions ?? []).length}</span>
+                </summary>
+                <div className="px-3 pb-3 pt-1">
+                  <div className="rounded-md border border-slate-800 bg-slate-950">
+                    <div className="max-h-[180px] overflow-auto">
+                      {(sessions ?? []).length === 0 ? (
+                        <div className="px-3 py-3 text-xs text-slate-500">No active sessions.</div>
+                      ) : (
+                        <div className="overflow-x-auto">
+                          <table className="min-w-[520px] text-left text-xs">
+                            <thead className="border-b border-slate-800 text-slate-400">
+                              <tr>
+                                <th className="px-3 py-2">Owner</th>
+                                <th className="px-3 py-2">Mode</th>
+                                <th className="px-3 py-2">Phase</th>
+                                <th className="px-3 py-2">MEV</th>
+                                <th className="px-3 py-2">Running</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {(sessions ?? []).map((s) => {
+                                const isMe = wallet.publicKey?.toBase58() === s.owner;
+                                return (
+                                  <tr key={s.owner} className="border-b border-slate-900">
+                                    <td className="px-3 py-2 font-mono text-[11px] text-slate-200">
+                                      {isMe ? <span className="text-emerald-300">● </span> : null}
+                                      {s.owner}
+                                    </td>
+                                    <td className="px-3 py-2 text-slate-200">{s.mode ?? "-"}</td>
+                                    <td className="px-3 py-2 text-slate-200">{s.pumpFunPhase ?? "-"}</td>
+                                    <td className="px-3 py-2 text-slate-200">
+                                      {s.mevEnabled == null ? "-" : s.mevEnabled ? "on" : "off"}
+                                    </td>
+                                    <td className="px-3 py-2 text-slate-200">{s.running ? "yes" : "no"}</td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="mt-2 text-xs text-slate-400">
+                    To run sniper + volume with different wallets, open this app in two browser profiles and connect
+                    a different wallet in each.
+                  </div>
                 </div>
-              </div>
-              <div className="mt-2 text-xs text-slate-400">
-                To run sniper + volume with different wallets, open this app in two browser profiles and connect a
-                different wallet in each.
-              </div>
+              </details>
             </div>
-          </section>
+          </CollapsibleCard>
 
-          <section className="rounded-xl border border-slate-800 bg-slate-900/50 p-5">
-            <div className="flex items-center justify-between">
-              <div className="text-lg font-semibold">Live logs</div>
+          <CollapsibleCard
+            title="Live logs"
+            defaultOpen={false}
+            right={
               <button
                 className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-200 disabled:opacity-60"
                 onClick={copyLogs}
                 disabled={loading}
                 type="button"
               >
-                Copy logs
+                Copy
               </button>
-            </div>
+            }
+          >
             <div
               ref={logBoxRef}
-              className="mt-3 h-[340px] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed"
+              className="h-[240px] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed sm:h-[340px]"
             >
               {displayLogs.length === 0 ? (
                 <div className="text-slate-500">No logs yet.</div>
@@ -883,23 +955,25 @@ export function Dashboard() {
             <div className="mt-2 text-xs text-slate-400">
               Tip: Keep this tab open so you can promptly sign when a qualifying pool is detected.
             </div>
-          </section>
+          </CollapsibleCard>
         </div>
 
-        <section className="mt-6 rounded-xl border border-slate-800 bg-slate-900/50 p-5">
-          <div className="flex items-center justify-between">
-            <div className="text-lg font-semibold">Bundle / transaction history</div>
-            <button
-              className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-200"
-              onClick={() => fetchStatus().catch(() => {})}
-              disabled={loading}
-            >
-              Refresh
-            </button>
-          </div>
-
-          <div className="mt-3 overflow-auto rounded-lg border border-slate-800">
-            <table className="min-w-full text-left text-sm">
+        <div className="mt-4 sm:mt-6">
+          <CollapsibleCard
+            title="Bundle / transaction history"
+            defaultOpen={false}
+            right={
+              <button
+                className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-200"
+                onClick={() => fetchStatus().catch(() => {})}
+                disabled={loading}
+              >
+                Refresh
+              </button>
+            }
+          >
+            <div className="mt-2 overflow-x-auto rounded-lg border border-slate-800">
+              <table className="min-w-[820px] text-left text-sm">
               <thead className="bg-slate-950 text-slate-300">
                 <tr>
                   <th className="px-4 py-3">Bundle</th>
@@ -970,7 +1044,8 @@ export function Dashboard() {
               </tbody>
             </table>
           </div>
-        </section>
+          </CollapsibleCard>
+        </div>
       </div>
     </main>
   );
