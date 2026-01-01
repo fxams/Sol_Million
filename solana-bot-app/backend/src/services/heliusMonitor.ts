@@ -2,6 +2,7 @@ import WebSocket from "ws";
 import { Connection, PublicKey } from "@solana/web3.js";
 import { jito } from "./jito.js";
 import { buildUnsignedBuyLikeTxBase64, buildUnsignedJitoTipTxBase64, randomTipLamports } from "./txBuilder.js";
+import { jupiterQuote, jupiterSwapTxBase64, WSOL_MINT } from "./jupiter.js";
 import { env, getRpcUrl, getWsUrl } from "../utils/env.js";
 import type { BotConfig, Cluster, WalletSession } from "../state/store.js";
 import { getOrCreateSession, pushClusterLog, pushSessionLog, state } from "../state/store.js";
@@ -556,8 +557,8 @@ export async function ensureClusterSubscription(cluster: Cluster) {
         type: "SIGN_AND_BUNDLE",
         reason:
           cfg.mode === "snipe"
-            ? `[snipe/${cfg.pumpFunPhase}] Target detected (${signature}). Click "Sign & submit pending bundle".`
-            : `[volume] Signal detected (${signature}). Click "Sign & submit pending bundle".`,
+            ? `[snipe/${cfg.pumpFunPhase}] Target detected (${signature}). Click "Sign & execute".`
+            : `[volume] Signal detected (${signature}). Click "Sign & execute".`,
         unsignedTxsBase64: []
       };
       (s.pendingAction as any).triggerSignature = signature;
@@ -592,6 +593,10 @@ export async function startWalletSession(owner: string, config: BotConfig) {
 
   pushSessionLog(cluster, owner, "info", `Session started. mode=${config.mode} mev=${config.mevEnabled}`);
   await ensureClusterSubscription(cluster);
+
+  if (config.mode === "volume") {
+    startVolumeLoop(cluster, owner);
+  }
 }
 
 export async function stopWalletSession(cluster: Cluster, owner: string) {
@@ -601,6 +606,8 @@ export async function stopWalletSession(cluster: Cluster, owner: string) {
   session.pendingAction = null;
   session.epoch += 1;
   pushSessionLog(cluster, owner, "info", "Session stopped");
+
+  stopVolumeLoop(cluster, owner);
 
   // If nobody is running, close WS to reduce resource usage.
   if (!anySessionsRunning(cluster)) {
@@ -653,13 +660,49 @@ export async function materializePendingUnsignedTxsForSession(opts: {
 
   const unsigned: string[] = [];
 
-  const buyTx = await buildUnsignedBuyLikeTxBase64({
-    cluster: opts.cluster,
-    owner: opts.owner,
-    amountSol: cfg.buyAmountSol,
-    memo: `mode=${cfg.mode} phase=${cfg.pumpFunPhase} source=${source} sig=${triggerSig}${targetMint ? ` mint=${targetMint}` : ""}`
-  });
-  unsigned.push(buyTx);
+  if (cfg.mode === "volume") {
+    if (!cfg.volumeEnabled) return null;
+    const tokenMint = String(cfg.volumeTokenMint || "").trim();
+    if (!tokenMint) throw new Error("volumeTokenMint is required for volume mode");
+
+    const lamports = Math.max(1, Math.floor(cfg.buyAmountSol * 1e9));
+
+    const buyQuote = await jupiterQuote({
+      inputMint: WSOL_MINT,
+      outputMint: tokenMint,
+      amount: String(lamports),
+      slippageBps: cfg.volumeSlippageBps
+    });
+    const buySwapTxB64 = await jupiterSwapTxBase64({
+      quoteResponse: buyQuote,
+      userPublicKey: opts.owner,
+      wrapAndUnwrapSol: true
+    });
+    unsigned.push(buySwapTxB64);
+
+    if (cfg.volumeRoundtrip) {
+      const sellQuote = await jupiterQuote({
+        inputMint: tokenMint,
+        outputMint: WSOL_MINT,
+        amount: String(buyQuote.outAmount),
+        slippageBps: cfg.volumeSlippageBps
+      });
+      const sellSwapTxB64 = await jupiterSwapTxBase64({
+        quoteResponse: sellQuote,
+        userPublicKey: opts.owner,
+        wrapAndUnwrapSol: true
+      });
+      unsigned.push(sellSwapTxB64);
+    }
+  } else {
+    const buyTx = await buildUnsignedBuyLikeTxBase64({
+      cluster: opts.cluster,
+      owner: opts.owner,
+      amountSol: cfg.buyAmountSol,
+      memo: `mode=${cfg.mode} phase=${cfg.pumpFunPhase} source=${source} sig=${triggerSig}${targetMint ? ` mint=${targetMint}` : ""}`
+    });
+    unsigned.push(buyTx);
+  }
 
   if (cfg.mevEnabled) {
     if (opts.cluster === "devnet") {
@@ -680,5 +723,71 @@ export async function materializePendingUnsignedTxsForSession(opts: {
   }
 
   return unsigned;
+}
+
+// ---- Volume loop (timer-driven pending actions) ----
+
+const volumeTimers = new Map<string, NodeJS.Timeout>();
+
+function volumeKey(cluster: Cluster, owner: string) {
+  return `${cluster}:${owner}`;
+}
+
+function startVolumeLoop(cluster: Cluster, owner: string) {
+  const k = volumeKey(cluster, owner);
+  if (volumeTimers.has(k)) return;
+
+  const tick = () => {
+    const s = getOrCreateSession(cluster, owner);
+    const cfg = s.config;
+    if (!s.running || !cfg || cfg.mode !== "volume") return;
+    if (!cfg.volumeEnabled) return;
+    if (s.pendingAction) return;
+
+    s.pendingAction = {
+      type: "SIGN_AND_BUNDLE",
+      reason: cfg.volumeRoundtrip
+        ? `[volume] Cycle ready: SOL→token→SOL. Click "Sign & execute".`
+        : `[volume] Cycle ready: SOL→token. Click "Sign & execute".`,
+      unsignedTxsBase64: []
+    };
+    (s.pendingAction as any).triggerSignature = `volumeTimer:${Date.now()}`;
+    (s.pendingAction as any).source = "volumeTimer";
+    (s.pendingAction as any).targetMint = cfg.volumeTokenMint;
+    (s.pendingAction as any).needsUnsignedTxs = true;
+  };
+
+  // Create the first action quickly, then repeat.
+  try {
+    tick();
+  } catch {
+    // ignore
+  }
+
+  const handle = setInterval(() => {
+    try {
+      const s = getOrCreateSession(cluster, owner);
+      const cfg = s.config;
+      const intervalMs = cfg?.mode === "volume" ? Math.max(2, cfg.volumeIntervalSec) * 1000 : 20_000;
+      // Run at 1Hz, but only create a new action when the interval has elapsed.
+      const lastMs = (s as any)._lastVolumeActionMs as number | undefined;
+      const now = Date.now();
+      if (lastMs && now - lastMs < intervalMs) return;
+      const before = s.pendingAction;
+      tick();
+      if (!before && s.pendingAction) (s as any)._lastVolumeActionMs = now;
+    } catch (e: any) {
+      pushSessionLog(cluster, owner, "warn", `Volume tick failed: ${e?.message ?? String(e)}`);
+    }
+  }, 1000);
+
+  volumeTimers.set(k, handle);
+}
+
+function stopVolumeLoop(cluster: Cluster, owner: string) {
+  const k = volumeKey(cluster, owner);
+  const h = volumeTimers.get(k);
+  if (h) clearInterval(h);
+  volumeTimers.delete(k);
 }
 

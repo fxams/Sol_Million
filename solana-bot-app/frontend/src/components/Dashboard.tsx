@@ -88,6 +88,11 @@ export function Dashboard() {
   const [autoAllowToken2022, setAutoAllowToken2022] = useState(true);
   const [mevEnabled, setMevEnabled] = useState(true);
   const [buyAmountSol, setBuyAmountSol] = useState("0.1");
+  const [volumeEnabled, setVolumeEnabled] = useState(true);
+  const [volumeIntervalSec, setVolumeIntervalSec] = useState("20");
+  const [volumeTokenMint, setVolumeTokenMint] = useState("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+  const [volumeSlippageBps, setVolumeSlippageBps] = useState("150");
+  const [volumeRoundtrip, setVolumeRoundtrip] = useState(true);
   const [takeProfitPct, setTakeProfitPct] = useState("30");
   const [stopLossPct, setStopLossPct] = useState("15");
   const [minLiquiditySol, setMinLiquiditySol] = useState("10");
@@ -161,6 +166,11 @@ export function Dashboard() {
       },
       mevEnabled,
       buyAmountSol: Number(buyAmountSol),
+      volumeEnabled,
+      volumeIntervalSec: Number(volumeIntervalSec),
+      volumeTokenMint: volumeTokenMint.trim(),
+      volumeSlippageBps: Number(volumeSlippageBps),
+      volumeRoundtrip,
       takeProfitPct: Number(takeProfitPct),
       stopLossPct: Number(stopLossPct),
       minLiquiditySol: Number(minLiquiditySol),
@@ -184,6 +194,11 @@ export function Dashboard() {
       autoAllowToken2022,
       mevEnabled,
       buyAmountSol,
+      volumeEnabled,
+      volumeIntervalSec,
+      volumeTokenMint,
+      volumeSlippageBps,
+      volumeRoundtrip,
       takeProfitPct,
       stopLossPct,
       minLiquiditySol,
@@ -286,7 +301,7 @@ export function Dashboard() {
     }
   }, [backendBaseUrl, cluster, fetchStatus, wallet.publicKey]);
 
-  const signAndSubmitPendingBundle = useCallback(async () => {
+  const signAndExecutePendingAction = useCallback(async () => {
     if (!pendingAction) return;
     if (!wallet.connected || !wallet.publicKey) {
       toast.error("Connect a wallet first");
@@ -300,10 +315,7 @@ export function Dashboard() {
     setLoading(true);
     try {
       if (pendingAction.type !== "SIGN_AND_BUNDLE") return;
-      if (cluster === "devnet" && mevEnabled) {
-        toast.error("Jito bundles are mainnet-only; disable MEV on devnet.");
-        return;
-      }
+      if (cluster === "devnet" && mevEnabled) throw new Error("Jito bundles are mainnet-only; disable MEV on devnet.");
 
       // 1) Deserialize unsigned txs from backend
       const unsigned = pendingAction.unsignedTxsBase64.map((b64) =>
@@ -320,39 +332,57 @@ export function Dashboard() {
 
       const signedTxsBase64 = signed.map((tx) => Buffer.from(tx.serialize()).toString("base64"));
 
-      // 3) Ask backend to build + simulate the bundle (Jito) from signed txs
-      const prepRes = await fetch(`${backendBaseUrl}/api/prepare-bundle`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          cluster,
-          owner: wallet.publicKey.toBase58(),
-          signedTxsBase64
-        })
-      });
-      const prepData = await prepRes.json().catch(() => ({}));
-      if (!prepRes.ok) throw new Error(prepData?.error ?? `prepare failed (${prepRes.status})`);
+      if (mevEnabled) {
+        // 3) Ask backend to build + simulate the bundle (Jito) from signed txs
+        const prepRes = await fetch(`${backendBaseUrl}/api/prepare-bundle`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            cluster,
+            owner: wallet.publicKey.toBase58(),
+            signedTxsBase64
+          })
+        });
+        const prepData = await prepRes.json().catch(() => ({}));
+        if (!prepRes.ok) throw new Error(prepData?.error ?? `prepare failed (${prepRes.status})`);
 
-      const bundleId = prepData.bundleId as string;
-      toast.success(`Bundle prepared: ${bundleId.slice(0, 10)}…`);
+        const bundleId = prepData.bundleId as string;
+        toast.success(`Bundle prepared: ${bundleId.slice(0, 10)}…`);
 
-      // 4) Submit bundle
-      const subRes = await fetch(`${backendBaseUrl}/api/submit-bundle`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ cluster, owner: wallet.publicKey.toBase58(), bundleId })
-      });
-      const subData = await subRes.json().catch(() => ({}));
-      if (!subRes.ok) throw new Error(subData?.error ?? `submit failed (${subRes.status})`);
+        // 4) Submit bundle
+        const subRes = await fetch(`${backendBaseUrl}/api/submit-bundle`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ cluster, owner: wallet.publicKey.toBase58(), bundleId })
+        });
+        const subData = await subRes.json().catch(() => ({}));
+        if (!subRes.ok) throw new Error(subData?.error ?? `submit failed (${subRes.status})`);
 
-      toast.success("Bundle submitted to Jito");
+        toast.success("Submitted to Jito");
+      } else {
+        const sigs: string[] = [];
+        for (const tx of signed) {
+          const sig = await connection.sendRawTransaction(tx.serialize(), {
+            skipPreflight: false,
+            preflightCommitment: "processed",
+            maxRetries: 3
+          });
+          sigs.push(sig);
+        }
+        await fetch(`${backendBaseUrl}/api/ack-action`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ cluster, owner: wallet.publicKey.toBase58() })
+        }).catch(() => {});
+        toast.success(`Sent ${sigs.length} tx(s) via public RPC`);
+      }
       await fetchStatus();
     } catch (e: any) {
       toast.error(e?.message ?? "Failed to sign/submit");
     } finally {
       setLoading(false);
     }
-  }, [backendBaseUrl, cluster, fetchStatus, mevEnabled, pendingAction, wallet]);
+  }, [backendBaseUrl, cluster, connection, fetchStatus, mevEnabled, pendingAction, wallet]);
 
   const sendPublicTestTx = useCallback(async () => {
     if (!wallet.connected || !wallet.publicKey) {
@@ -639,6 +669,64 @@ export function Dashboard() {
               )}
             </div>
 
+            {mode === "volume" && (
+              <div className="mt-4 rounded-lg border border-slate-800 bg-slate-950 p-3">
+                <div className="text-sm font-semibold text-slate-200">Volume settings</div>
+                <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span className="text-slate-300">Interval (sec)</span>
+                    <input
+                      className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                      value={volumeIntervalSec}
+                      onChange={(e) => setVolumeIntervalSec(e.target.value)}
+                      inputMode="numeric"
+                      disabled={loading}
+                    />
+                  </label>
+                  <label className="flex flex-col gap-1 text-sm">
+                    <span className="text-slate-300">Slippage (bps)</span>
+                    <input
+                      className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2"
+                      value={volumeSlippageBps}
+                      onChange={(e) => setVolumeSlippageBps(e.target.value)}
+                      inputMode="numeric"
+                      disabled={loading}
+                    />
+                  </label>
+                </div>
+                <label className="mt-3 flex flex-col gap-1 text-sm">
+                  <span className="text-slate-300">Token mint (paired against SOL)</span>
+                  <input
+                    className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 font-mono text-xs"
+                    value={volumeTokenMint}
+                    onChange={(e) => setVolumeTokenMint(e.target.value)}
+                    disabled={loading}
+                  />
+                  <span className="text-xs text-slate-400">
+                    Default is USDC. Volume mode uses Jupiter routes (SOL→token, optionally token→SOL).
+                  </span>
+                </label>
+                <label className="mt-3 flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
+                  <span className="text-slate-200">Roundtrip (SOL→token→SOL)</span>
+                  <input
+                    type="checkbox"
+                    checked={volumeRoundtrip}
+                    onChange={(e) => setVolumeRoundtrip(e.target.checked)}
+                    disabled={loading}
+                  />
+                </label>
+                <label className="mt-2 flex items-center justify-between gap-3 rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
+                  <span className="text-slate-200">Enable volume generator</span>
+                  <input
+                    type="checkbox"
+                    checked={volumeEnabled}
+                    onChange={(e) => setVolumeEnabled(e.target.checked)}
+                    disabled={loading}
+                  />
+                </label>
+              </div>
+            )}
+
             <div className="mt-4">
               <label className="flex flex-col gap-1 text-sm">
                 <span className="text-slate-300">Optional snipe list (token mints)</span>
@@ -687,11 +775,11 @@ export function Dashboard() {
 
               <button
                 className="rounded-md border border-slate-700 bg-slate-950 px-4 py-2 text-sm font-semibold text-slate-200 disabled:opacity-60"
-                disabled={loading || !pendingAction || !mevEnabled}
-                onClick={signAndSubmitPendingBundle}
-                title={!mevEnabled ? "Enable MEV to bundle via Jito" : ""}
+                disabled={loading || !pendingAction}
+                onClick={signAndExecutePendingAction}
+                title={mevEnabled ? "Executes via Jito bundle" : "Executes via public RPC"}
               >
-                Sign & submit pending bundle
+                Sign & execute
               </button>
             </div>
 
@@ -700,8 +788,8 @@ export function Dashboard() {
                 <div className="font-semibold text-amber-200">Pending action</div>
                 <div className="mt-1 text-amber-100/90">{pendingAction.reason}</div>
                 <div className="mt-2 text-xs text-amber-100/70">
-                  Your wallet will sign all transactions locally, then the backend will simulate +
-                  submit the bundle to Jito for atomic execution (MEV protection).
+                  Your wallet signs locally. With MEV on: backend simulates + submits a Jito bundle. With MEV off:
+                  transactions are sent via public RPC.
                 </div>
               </div>
             )}

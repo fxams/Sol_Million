@@ -38,6 +38,12 @@ const configSchema = z.object({
     .default({}),
   mevEnabled: z.boolean().default(true),
   buyAmountSol: z.number().finite().positive().max(10_000),
+  volumeEnabled: z.boolean().default(true),
+  volumeIntervalSec: z.number().finite().min(2).max(3600).default(20),
+  // Default: USDC mint (mainnet). User can override for a specific token.
+  volumeTokenMint: z.string().min(32).max(64).default("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"),
+  volumeSlippageBps: z.number().int().min(1).max(5000).default(150),
+  volumeRoundtrip: z.boolean().default(true),
   takeProfitPct: z.number().finite().min(0).max(10_000).default(0),
   stopLossPct: z.number().finite().min(0).max(10_000).default(0),
   minLiquiditySol: z.number().finite().min(0).max(10_000).default(0),
@@ -109,6 +115,8 @@ router.get("/status", async (req, res) => {
     } catch (e: any) {
       pushSessionLog(cluster, owner, "error", `Failed to build unsigned txs: ${e?.message ?? String(e)}`);
       session.pendingAction = null;
+      // Avoid tight retry loops in volume mode when Jupiter has no route.
+      if (session.config?.mode === "volume") (session as any)._lastVolumeActionMs = Date.now();
     }
   }
 
@@ -174,6 +182,22 @@ router.post("/prepare-sell", async (req, res) => {
   } catch (e: any) {
     return res.status(500).json({ error: e?.message ?? "Failed to build tx" });
   }
+});
+
+// Used by the frontend when executing a pending action via public RPC (MEV disabled).
+router.post("/ack-action", async (req, res) => {
+  const parsed = z
+    .object({
+      cluster: clusterSchema.default("mainnet-beta"),
+      owner: ownerSchema
+    })
+    .safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+  const { cluster, owner } = parsed.data;
+  const session = getOrCreateSession(cluster, owner);
+  session.pendingAction = null;
+  pushSessionLog(cluster, owner, "info", "Pending action acknowledged/cleared by client.");
+  return res.json({ ok: true });
 });
 
 function isSystemTransferToTipAccount(tx: VersionedTransaction, tipAccounts: Set<string>) {

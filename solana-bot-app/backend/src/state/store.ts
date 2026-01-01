@@ -44,6 +44,16 @@ export type BotConfig = {
   autoSnipe: AutoSnipeConfig;
   mevEnabled: boolean;
   buyAmountSol: number;
+  /**
+   * Volume mode settings (template implementation uses Jupiter routes).
+   * `volumeTokenMint` is the "other side" of SOL (WSOL) in the swap cycle.
+   */
+  volumeEnabled: boolean;
+  volumeIntervalSec: number;
+  volumeTokenMint: string;
+  volumeSlippageBps: number;
+  /** If true, generates a buy then a sell (SOL->token->SOL) each cycle. */
+  volumeRoundtrip: boolean;
   takeProfitPct: number;
   stopLossPct: number;
   minLiquiditySol: number;
