@@ -939,7 +939,7 @@ export function Dashboard() {
             )}
 
             <div className="mt-4">
-              <details className="group rounded-lg border border-slate-800 bg-slate-950">
+              <details className="group rounded-lg border border-slate-800 bg-slate-950" open={fleetWallets.length > 0}>
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm text-slate-200 [&::-webkit-details-marker]:hidden">
                   <div className="flex items-center gap-2">
                     <span className="text-slate-500 transition-transform group-open:rotate-90">›</span>
@@ -1006,6 +1006,29 @@ export function Dashboard() {
                   </div>
 
                   {fleetWallets.length > 0 && (
+                    <>
+                      <div className="mt-3 rounded-md border border-slate-800 bg-slate-950 p-2">
+                        <div className="text-xs font-semibold text-slate-200">Fleet addresses</div>
+                        <div className="mt-1 grid grid-cols-1 gap-1 text-[11px] text-slate-300 sm:grid-cols-2">
+                          {fleetWallets.map((w) => (
+                            <button
+                              key={w.owner}
+                              type="button"
+                              className="truncate rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-left font-mono text-sky-200 hover:bg-slate-900"
+                              title="Click to copy full address"
+                              onClick={() => {
+                                navigator.clipboard?.writeText?.(w.owner).then(
+                                  () => toast.success("Copied address"),
+                                  () => toast.error("Copy failed")
+                                );
+                              }}
+                            >
+                              {w.owner}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+
                     <div className="mt-3 overflow-x-auto rounded-md border border-slate-800 bg-slate-950">
                       <table className="min-w-[760px] text-left text-xs">
                         <thead className="border-b border-slate-800 text-slate-400">
@@ -1019,24 +1042,11 @@ export function Dashboard() {
                         <tbody>
                           {(fleetItems.length ? fleetItems : fleetWallets.map((w) => ({ owner: w.owner } as any))).map(
                             (it: FleetStatusItem, idx: number) => {
-                              const short = `${it.owner.slice(0, 4)}…${it.owner.slice(-4)}`;
                               const pending = Boolean(it.pendingAction);
                               return (
                                 <tr key={`${it.owner}-${idx}`} className="border-b border-slate-900">
-                                  <td className="px-3 py-2 font-mono text-[11px] text-slate-200">
-                                    <button
-                                      className="text-sky-300 hover:underline"
-                                      type="button"
-                                      onClick={() => {
-                                        navigator.clipboard?.writeText?.(it.owner).then(
-                                          () => toast.success("Copied owner"),
-                                          () => toast.error("Copy failed")
-                                        );
-                                      }}
-                                      title="Click to copy"
-                                    >
-                                      {short}
-                                    </button>
+                                  <td className="px-3 py-2 font-mono text-[11px] text-slate-200" title={it.owner}>
+                                    <span className="inline-block max-w-[360px] truncate">{it.owner}</span>
                                   </td>
                                   <td className="px-3 py-2 text-slate-200">{it.running ? "yes" : "no"}</td>
                                   <td className="px-3 py-2 text-slate-200">
@@ -1052,6 +1062,7 @@ export function Dashboard() {
                         </tbody>
                       </table>
                     </div>
+                    </>
                   )}
                 </div>
               </details>
