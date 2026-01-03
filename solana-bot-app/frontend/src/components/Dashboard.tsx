@@ -4,7 +4,15 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
+import {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemProgram,
+  TransactionMessage,
+  VersionedTransaction,
+  clusterApiUrl
+} from "@solana/web3.js";
 import clsx from "clsx";
 import { Buffer } from "buffer";
 import {
@@ -194,6 +202,11 @@ function explorerSigUrl(sig: string, cluster: string) {
 function jitoBundleUrl(bundleId: string) {
   // Jito explorer works for mainnet bundles (bundle ID).
   return `https://explorer.jito.wtf/bundle/${bundleId}`;
+}
+
+function isAccessForbiddenRpcError(e: any) {
+  const msg = String(e?.message ?? e ?? "");
+  return msg.includes("403") || msg.toLowerCase().includes("access forbidden");
 }
 
 export function Dashboard() {
@@ -654,7 +667,20 @@ export function Dashboard() {
     setLoading(true);
     try {
       const payer = wallet.publicKey;
-      const { blockhash } = await connection.getLatestBlockhash("processed");
+      let rpcConn: Connection = connection;
+      let blockhash: string;
+      try {
+        const bh = await rpcConn.getLatestBlockhash("processed");
+        blockhash = bh.blockhash;
+      } catch (e: any) {
+        if (!isAccessForbiddenRpcError(e)) throw e;
+        // If the configured RPC is forbidden (common with missing/invalid API keys),
+        // fall back to Solana public RPC for funding transactions.
+        toast.error("RPC access forbidden (403). Falling back to public RPC. Set NEXT_PUBLIC_RPC_URL to a valid endpoint.");
+        rpcConn = new Connection(clusterApiUrl(cluster), "processed");
+        const bh = await rpcConn.getLatestBlockhash("processed");
+        blockhash = bh.blockhash;
+      }
 
       const txs: VersionedTransaction[] = [];
 
@@ -690,7 +716,7 @@ export function Dashboard() {
         const recipientAtas = recipients.map((to) => getAssociatedTokenAddressSync(mint, to, false));
 
         // Check which ATAs exist (batch RPC)
-        const infos = await connection.getMultipleAccountsInfo(recipientAtas, "processed");
+        const infos = await rpcConn.getMultipleAccountsInfo(recipientAtas, "processed");
         const missing = new Set<string>();
         for (let i = 0; i < recipientAtas.length; i++) {
           if (!infos[i]) missing.add(recipientAtas[i].toBase58());
@@ -730,7 +756,7 @@ export function Dashboard() {
       let sent = 0;
       for (const tx of signedTxs) {
         // eslint-disable-next-line no-await-in-loop
-        await connection.sendRawTransaction(tx.serialize(), {
+        await rpcConn.sendRawTransaction(tx.serialize(), {
           skipPreflight: false,
           preflightCommitment: "processed",
           maxRetries: 3
