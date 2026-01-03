@@ -160,6 +160,8 @@ export function Dashboard() {
   const { connection } = useConnection();
   const wallet = useWallet();
 
+  const [activeTab, setActiveTab] = useState<"bot" | "fleet">("bot");
+
   const [cluster, setCluster] = useState<"mainnet-beta" | "devnet">(
     ((process.env.NEXT_PUBLIC_CLUSTER ?? "mainnet-beta") as "mainnet-beta" | "devnet") ||
       "mainnet-beta"
@@ -403,6 +405,7 @@ export function Dashboard() {
   }, [fetchStatus]);
 
   useEffect(() => {
+    if (activeTab !== "fleet") return;
     if (fleetWallets.length === 0) return;
     let t: ReturnType<typeof setInterval> | undefined;
     let stopped = false;
@@ -438,9 +441,10 @@ export function Dashboard() {
       if (t) clearInterval(t);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [fetchFleetStatus, fleetWallets.length]);
+  }, [activeTab, fetchFleetStatus, fleetWallets.length]);
 
   useEffect(() => {
+    if (activeTab !== "fleet") return;
     if (fleetWallets.length === 0) return;
     let t: ReturnType<typeof setInterval> | undefined;
     let stopped = false;
@@ -476,7 +480,7 @@ export function Dashboard() {
       if (t) clearInterval(t);
       document.removeEventListener("visibilitychange", onVis);
     };
-  }, [fetchFleetMetrics, fleetWallets.length]);
+  }, [activeTab, fetchFleetMetrics, fleetWallets.length]);
 
   useEffect(() => {
     // Auto-scroll logs to bottom
