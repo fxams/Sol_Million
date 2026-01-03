@@ -120,6 +120,13 @@ function logLooksLikeVolume(msg: string) {
   );
 }
 
+function logCategory(msg: string): "volume" | "snipe" | "other" {
+  // Order matters: "volume" first so shared phrases don't leak into snipe.
+  if (logLooksLikeVolume(msg)) return "volume";
+  if (logLooksLikeSnipe(msg)) return "snipe";
+  return "other";
+}
+
 function CollapsibleCard(props: {
   title: string;
   defaultOpen?: boolean;
@@ -318,12 +325,12 @@ export function Dashboard() {
 
   const snipeLogs = useMemo(() => {
     const logs = displayLogs as LogLine[];
-    return logs.filter((l) => logLooksLikeSnipe(l.msg));
+    return logs.filter((l) => logCategory(l.msg) === "snipe");
   }, [displayLogs]);
 
   const volumeLogs = useMemo(() => {
     const logs = displayLogs as LogLine[];
-    return logs.filter((l) => logLooksLikeVolume(l.msg));
+    return logs.filter((l) => logCategory(l.msg) === "volume");
   }, [displayLogs]);
 
   const copyLogs = useCallback(async () => {
@@ -1498,27 +1505,7 @@ export function Dashboard() {
               <CollapsibleCard title="Volume logs" defaultOpen={mode === "volume"}>
                 <div className="h-[200px] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed sm:h-[260px]">
                   {volumeLogs.length === 0 ? (
-                    <div className="text-slate-500">
-                      No volume-tagged logs yet. Showing recent logs:
-                      <div className="mt-2">
-                        {displayLogs.slice(-50).map((l: any, idx: number) => (
-                          <div key={`${l.ts}-all-${idx}`} className="whitespace-pre-wrap">
-                            <span className="text-slate-500">{new Date(l.ts).toLocaleTimeString()} </span>
-                            <span
-                              className={clsx(
-                                l.level === "error"
-                                  ? "text-rose-300"
-                                  : l.level === "warn"
-                                    ? "text-amber-300"
-                                    : "text-slate-200"
-                              )}
-                            >
-                              {l.msg}
-                            </span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
+                    <div className="text-slate-500">No volume logs yet.</div>
                   ) : (
                     volumeLogs.map((l, idx) => (
                       <div key={`${l.ts}-v-${idx}`} className="whitespace-pre-wrap">
