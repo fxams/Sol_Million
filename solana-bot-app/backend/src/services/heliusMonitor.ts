@@ -271,16 +271,44 @@ async function checkMintSafety(opts: {
       }),
     2
   );
-  const amounts = largest.value.map((a) => BigInt(a.amount));
-  const top1 = amounts[0] ?? 0n;
-  const top10 = amounts.slice(0, 10).reduce((s, x) => s + x, 0n);
-  const nonZeroHolders = amounts.filter((a) => a > 0n).length;
+  const topRows = largest.value.slice(0, 10);
+  const amounts = topRows.map((a) => BigInt(a.amount));
 
-  const top1Pct = Number((top1 * 10_000n) / supply) / 100;
-  const top10Pct = Number((top10 * 10_000n) / supply) / 100;
+  // Heuristic: ignore program-controlled token accounts (off-curve authorities).
+  // On Pump.fun (pre-migration) and AMMs, the largest holder is often the bonding curve / pool account.
+  // Those are typically PDAs (off-curve) and should not be treated as a "whale holder" risk.
+  let excludedIdx = new Set<number>();
+  try {
+    const addrs = topRows.map((r) => r.address);
+    const infos = await withRpcLimit(
+      opts.cluster,
+      async () => await withRetries(async () => await connection.getMultipleAccountsInfo(addrs, "confirmed"), { attempts: 3, baseDelayMs: 200 }),
+      2
+    );
+    for (let i = 0; i < infos.length; i++) {
+      const info = infos[i];
+      if (!info?.data) continue;
+      const buf = Buffer.from(info.data);
+      if (buf.length < 64) continue;
+      const ownerPk = new PublicKey(buf.subarray(32, 64));
+      const isOnCurve = PublicKey.isOnCurve(ownerPk.toBytes());
+      if (!isOnCurve) excludedIdx.add(i);
+    }
+  } catch {
+    // best-effort only; fall back to raw concentration calculation
+    excludedIdx = new Set<number>();
+  }
+
+  const includedAmounts = amounts.filter((_, i) => !excludedIdx.has(i));
+  const top1Included = includedAmounts.length ? includedAmounts.reduce((m, x) => (x > m ? x : m), 0n) : 0n;
+  const top10Included = includedAmounts.reduce((s, x) => s + x, 0n);
+  const nonZeroHolders = includedAmounts.filter((a) => a > 0n).length;
+
+  const top1Pct = Number((top1Included * 10_000n) / supply) / 100;
+  const top10Pct = Number((top10Included * 10_000n) / supply) / 100;
 
   // On Pump.fun bonding curve launches, distribution is extremely concentrated at the very start.
-  // Only enforce holder concentration caps once there are enough non-zero holders to make it meaningful.
+  // Only enforce holder concentration caps once there are enough non-zero (non-pool) holders to make it meaningful.
   if (nonZeroHolders >= 5) {
     if (top1Pct > opts.cfg.maxTop1HolderPct) {
       return { ok: false, reason: `top1 too high (${top1Pct}%)`, top1Pct, top10Pct };
