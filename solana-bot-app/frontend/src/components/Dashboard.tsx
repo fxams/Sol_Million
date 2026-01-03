@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import toast from "react-hot-toast";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
@@ -88,6 +88,37 @@ type FleetMetricsItem = {
 };
 
 type SeriesPoint = { ts: number; value: number };
+
+type LogLine = { ts: number; level: "info" | "warn" | "error"; msg: string };
+
+function logLooksLikeSnipe(msg: string) {
+  const m = msg.toLowerCase();
+  return (
+    m.includes("[snipe/") ||
+    m.includes("auto-snipe") ||
+    m.includes("pumpfun") ||
+    m.includes("raydium") ||
+    m.includes("snipe list") ||
+    m.includes("session started. mode=snipe") ||
+    m.includes("mode=snipe") ||
+    m.includes("pending action created") ||
+    m.includes("target detected")
+  );
+}
+
+function logLooksLikeVolume(msg: string) {
+  const m = msg.toLowerCase();
+  return (
+    m.includes("[volume]") ||
+    m.includes("volume") ||
+    m.includes("pumpportal") ||
+    m.includes("jupiter") ||
+    m.includes("jito tip") ||
+    m.includes("session started. mode=volume") ||
+    m.includes("mode=volume") ||
+    m.includes("volumetimer")
+  );
+}
 
 function CollapsibleCard(props: {
   title: string;
@@ -273,8 +304,6 @@ export function Dashboard() {
     return { totalWallets, runningCount, pendingCount, totalSol, totalTx24h };
   }, [fleetItems, fleetMetrics, fleetWallets.length]);
 
-  const logBoxRef = useRef<HTMLDivElement | null>(null);
-
   const backendBaseUrl = useMemo(() => getBackendBaseUrl(), []);
 
   const displayLogs = useMemo(() => {
@@ -282,6 +311,16 @@ export function Dashboard() {
     merged.sort((a, b) => a.ts - b.ts);
     return merged;
   }, [clusterLogs, sessionLogs]);
+
+  const snipeLogs = useMemo(() => {
+    const logs = displayLogs as LogLine[];
+    return logs.filter((l) => logLooksLikeSnipe(l.msg));
+  }, [displayLogs]);
+
+  const volumeLogs = useMemo(() => {
+    const logs = displayLogs as LogLine[];
+    return logs.filter((l) => logLooksLikeVolume(l.msg));
+  }, [displayLogs]);
 
   const copyLogs = useCallback(async () => {
     try {
@@ -550,13 +589,6 @@ export function Dashboard() {
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [activeTab, fetchFleetMetrics, fleetWallets.length]);
-
-  useEffect(() => {
-    // Auto-scroll logs to bottom
-    const el = logBoxRef.current;
-    if (!el) return;
-    el.scrollTop = el.scrollHeight;
-  }, [displayLogs]);
 
   const startBot = useCallback(async () => {
     if (!wallet.publicKey) {
@@ -1433,35 +1465,59 @@ export function Dashboard() {
               </button>
             }
           >
-            <div
-              ref={logBoxRef}
-              className="h-[240px] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed sm:h-[340px]"
-            >
-              {displayLogs.length === 0 ? (
-                <div className="text-slate-500">No logs yet.</div>
-              ) : (
-                displayLogs.map((l, idx) => (
-                  <div key={`${l.ts}-${idx}`} className="whitespace-pre-wrap">
-                    <span className="text-slate-500">
-                      {new Date(l.ts).toLocaleTimeString()}{" "}
-                    </span>
-                    <span
-                      className={clsx(
-                        l.level === "error"
-                          ? "text-rose-300"
-                          : l.level === "warn"
-                            ? "text-amber-300"
-                            : "text-slate-200"
-                      )}
-                    >
-                      {l.msg}
-                    </span>
-                  </div>
-                ))
-              )}
+            <div className="grid grid-cols-1 gap-3">
+              <CollapsibleCard title="Snipe logs" defaultOpen={mode === "snipe"}>
+                <div className="h-[200px] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed sm:h-[260px]">
+                  {snipeLogs.length === 0 ? (
+                    <div className="text-slate-500">No snipe logs yet.</div>
+                  ) : (
+                    snipeLogs.map((l, idx) => (
+                      <div key={`${l.ts}-s-${idx}`} className="whitespace-pre-wrap">
+                        <span className="text-slate-500">{new Date(l.ts).toLocaleTimeString()} </span>
+                        <span
+                          className={clsx(
+                            l.level === "error"
+                              ? "text-rose-300"
+                              : l.level === "warn"
+                                ? "text-amber-300"
+                                : "text-slate-200"
+                          )}
+                        >
+                          {l.msg}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </CollapsibleCard>
+
+              <CollapsibleCard title="Volume logs" defaultOpen={mode === "volume"}>
+                <div className="h-[200px] overflow-auto rounded-lg border border-slate-800 bg-slate-950 p-3 font-mono text-xs leading-relaxed sm:h-[260px]">
+                  {volumeLogs.length === 0 ? (
+                    <div className="text-slate-500">No volume logs yet.</div>
+                  ) : (
+                    volumeLogs.map((l, idx) => (
+                      <div key={`${l.ts}-v-${idx}`} className="whitespace-pre-wrap">
+                        <span className="text-slate-500">{new Date(l.ts).toLocaleTimeString()} </span>
+                        <span
+                          className={clsx(
+                            l.level === "error"
+                              ? "text-rose-300"
+                              : l.level === "warn"
+                                ? "text-amber-300"
+                                : "text-slate-200"
+                          )}
+                        >
+                          {l.msg}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </CollapsibleCard>
             </div>
             <div className="mt-2 text-xs text-slate-400">
-              Tip: Keep this tab open so you can promptly sign when a qualifying pool is detected.
+              Logs are filtered by mode so you can focus while trading.
             </div>
           </CollapsibleCard>
         </div>
