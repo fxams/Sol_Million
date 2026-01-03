@@ -4,9 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { Keypair, VersionedTransaction } from "@solana/web3.js";
+import { Keypair, PublicKey, SystemProgram, TransactionMessage, VersionedTransaction } from "@solana/web3.js";
 import clsx from "clsx";
 import { Buffer } from "buffer";
+import {
+  createAssociatedTokenAccountInstruction,
+  createTransferInstruction,
+  getAssociatedTokenAddressSync
+} from "@solana/spl-token";
 
 type BotMode = "snipe" | "volume";
 type PumpFunPhase = "pre" | "post";
@@ -238,6 +243,13 @@ export function Dashboard() {
   const [fleetMetrics, setFleetMetrics] = useState<FleetMetricsItem[]>([]);
   const [fleetBalanceSeries, setFleetBalanceSeries] = useState<SeriesPoint[]>([]);
   const [fleetTx24hSeries, setFleetTx24hSeries] = useState<SeriesPoint[]>([]);
+
+  const [fundKind, setFundKind] = useState<"sol" | "token">("sol");
+  const [fundAmount, setFundAmount] = useState("0.01"); // per wallet
+  const [fundTokenMint, setFundTokenMint] = useState("");
+  const [fundTokenDecimals, setFundTokenDecimals] = useState("6");
+  const [fundMaxWallets, setFundMaxWallets] = useState("20");
+  const [fundChunkSize, setFundChunkSize] = useState("8");
 
   const fleetTotals = useMemo(() => {
     const totalWallets = fleetWallets.length;
@@ -614,6 +626,137 @@ export function Dashboard() {
       setLoading(false);
     }
   }, [backendBaseUrl, cluster, fetchFleetStatus, fleetWallets]);
+
+  const fundFleet = useCallback(async () => {
+    if (!wallet.connected || !wallet.publicKey) {
+      toast.error("Connect your main wallet first");
+      return;
+    }
+    if (!wallet.signTransaction) {
+      toast.error("Wallet does not support signTransaction");
+      return;
+    }
+    if (fleetWallets.length === 0) {
+      toast.error("Generate wallets first");
+      return;
+    }
+
+    const maxN = Math.max(1, Math.min(fleetWallets.length, Number(fundMaxWallets) || fleetWallets.length));
+    const recipients = fleetWallets.slice(0, maxN).map((w) => new PublicKey(w.owner));
+    const chunkSize = Math.max(1, Math.min(16, Number(fundChunkSize) || 8));
+
+    const amountNum = Number(fundAmount);
+    if (!Number.isFinite(amountNum) || amountNum <= 0) {
+      toast.error("Enter a valid amount");
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const payer = wallet.publicKey;
+      const { blockhash } = await connection.getLatestBlockhash("processed");
+
+      const txs: VersionedTransaction[] = [];
+
+      if (fundKind === "sol") {
+        const lamportsPer = Math.floor(amountNum * 1e9);
+        if (lamportsPer <= 0) throw new Error("Amount too small (lamports rounds to 0)");
+
+        for (let i = 0; i < recipients.length; i += chunkSize) {
+          const chunk = recipients.slice(i, i + chunkSize);
+          const ixs = chunk.map((to) =>
+            SystemProgram.transfer({
+              fromPubkey: payer,
+              toPubkey: to,
+              lamports: lamportsPer
+            })
+          );
+          const msg = new TransactionMessage({
+            payerKey: payer,
+            recentBlockhash: blockhash,
+            instructions: ixs
+          }).compileToV0Message();
+          txs.push(new VersionedTransaction(msg));
+        }
+      } else {
+        const mintStr = fundTokenMint.trim();
+        if (!mintStr) throw new Error("Enter token mint");
+        const mint = new PublicKey(mintStr);
+        const decimals = Math.max(0, Math.min(12, Number(fundTokenDecimals) || 0));
+        const baseUnits = BigInt(Math.round(amountNum * Math.pow(10, decimals)));
+        if (baseUnits <= 0n) throw new Error("Amount too small after decimals");
+
+        const payerAta = getAssociatedTokenAddressSync(mint, payer, false);
+        const recipientAtas = recipients.map((to) => getAssociatedTokenAddressSync(mint, to, false));
+
+        // Check which ATAs exist (batch RPC)
+        const infos = await connection.getMultipleAccountsInfo(recipientAtas, "processed");
+        const missing = new Set<string>();
+        for (let i = 0; i < recipientAtas.length; i++) {
+          if (!infos[i]) missing.add(recipientAtas[i].toBase58());
+        }
+
+        for (let i = 0; i < recipients.length; i += Math.max(1, Math.min(6, chunkSize))) {
+          const chunkRecipients = recipients.slice(i, i + Math.max(1, Math.min(6, chunkSize)));
+          const chunkAtas = recipientAtas.slice(i, i + Math.max(1, Math.min(6, chunkSize)));
+          const ixs = [];
+          for (let j = 0; j < chunkRecipients.length; j++) {
+            const to = chunkRecipients[j];
+            const ata = chunkAtas[j];
+            if (missing.has(ata.toBase58())) {
+              ixs.push(createAssociatedTokenAccountInstruction(payer, ata, to, mint));
+            }
+            ixs.push(createTransferInstruction(payerAta, ata, payer, baseUnits));
+          }
+          const msg = new TransactionMessage({
+            payerKey: payer,
+            recentBlockhash: blockhash,
+            instructions: ixs
+          }).compileToV0Message();
+          txs.push(new VersionedTransaction(msg));
+        }
+      }
+
+      const maybeSignAll = (wallet as any).signAllTransactions as ((txs: VersionedTransaction[]) => Promise<VersionedTransaction[]>) | undefined;
+      const signedTxs = maybeSignAll ? await maybeSignAll(txs) : await (async () => {
+        const out: VersionedTransaction[] = [];
+        for (const tx of txs) {
+          // eslint-disable-next-line no-await-in-loop
+          out.push(await wallet.signTransaction!(tx));
+        }
+        return out;
+      })();
+
+      let sent = 0;
+      for (const tx of signedTxs) {
+        // eslint-disable-next-line no-await-in-loop
+        await connection.sendRawTransaction(tx.serialize(), {
+          skipPreflight: false,
+          preflightCommitment: "processed",
+          maxRetries: 3
+        });
+        sent += 1;
+      }
+
+      toast.success(`Sent ${sent} transaction(s)`);
+      await fetchFleetMetrics();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Funding failed");
+    } finally {
+      setLoading(false);
+    }
+  }, [
+    connection,
+    fetchFleetMetrics,
+    fleetWallets,
+    fundAmount,
+    fundChunkSize,
+    fundKind,
+    fundMaxWallets,
+    fundTokenDecimals,
+    fundTokenMint,
+    wallet
+  ]);
 
   const stopBot = useCallback(async () => {
     if (!wallet.publicKey) {
@@ -1452,6 +1595,98 @@ export function Dashboard() {
 
                 {fleetWallets.length > 0 ? (
                   <>
+                    <CollapsibleCard title="Fund fleet" defaultOpen={false} className="mt-4">
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <label className="flex flex-col gap-1 text-sm">
+                          <span className="text-slate-300">Asset</span>
+                          <select
+                            className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
+                            value={fundKind}
+                            onChange={(e) => setFundKind(e.target.value as any)}
+                            disabled={loading}
+                          >
+                            <option value="sol">SOL</option>
+                            <option value="token">SPL token</option>
+                          </select>
+                        </label>
+
+                        <label className="flex flex-col gap-1 text-sm">
+                          <span className="text-slate-300">Amount per wallet</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
+                            value={fundAmount}
+                            onChange={(e) => setFundAmount(e.target.value)}
+                            inputMode="decimal"
+                            disabled={loading}
+                          />
+                        </label>
+
+                        {fundKind === "token" && (
+                          <>
+                            <label className="flex flex-col gap-1 text-sm sm:col-span-2">
+                              <span className="text-slate-300">Token mint</span>
+                              <input
+                                className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2 font-mono text-xs"
+                                value={fundTokenMint}
+                                onChange={(e) => setFundTokenMint(e.target.value)}
+                                disabled={loading}
+                                placeholder="Mint address"
+                              />
+                            </label>
+                            <label className="flex flex-col gap-1 text-sm">
+                              <span className="text-slate-300">Token decimals</span>
+                              <input
+                                className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
+                                value={fundTokenDecimals}
+                                onChange={(e) => setFundTokenDecimals(e.target.value)}
+                                inputMode="numeric"
+                                disabled={loading}
+                              />
+                            </label>
+                            <div className="text-xs text-slate-400 sm:pt-6">
+                              Decimals are required to convert “amount per wallet” to base units.
+                            </div>
+                          </>
+                        )}
+
+                        <label className="flex flex-col gap-1 text-sm">
+                          <span className="text-slate-300">Max wallets</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
+                            value={fundMaxWallets}
+                            onChange={(e) => setFundMaxWallets(e.target.value)}
+                            inputMode="numeric"
+                            disabled={loading}
+                          />
+                        </label>
+                        <label className="flex flex-col gap-1 text-sm">
+                          <span className="text-slate-300">Recipients per tx</span>
+                          <input
+                            className="rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
+                            value={fundChunkSize}
+                            onChange={(e) => setFundChunkSize(e.target.value)}
+                            inputMode="numeric"
+                            disabled={loading}
+                          />
+                        </label>
+                      </div>
+
+                      <div className="mt-3 flex flex-wrap items-center gap-2">
+                        <button
+                          className="rounded-md bg-sky-500 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-60"
+                          disabled={loading || fleetWallets.length === 0}
+                          type="button"
+                          onClick={fundFleet}
+                        >
+                          Send from connected wallet
+                        </button>
+                        <div className="text-xs text-slate-400">
+                          Sends on-chain transfers from your connected wallet. Token transfers will auto-create missing
+                          ATAs for recipients.
+                        </div>
+                      </div>
+                    </CollapsibleCard>
+
                     <div className="mt-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-800 bg-slate-950 p-3 sm:grid-cols-2">
                       <div>
                         <div className="flex items-center justify-between">
