@@ -66,6 +66,16 @@ type FleetStatusItem = {
   lastLog: { ts: number; level: "info" | "warn" | "error"; msg: string } | null;
 };
 
+type FleetMetricsItem = {
+  owner: string;
+  balanceSol: number;
+  txCountRecent: number;
+  txCount24h: number;
+  sampledAtMs: number;
+};
+
+type SeriesPoint = { ts: number; value: number };
+
 function CollapsibleCard(props: {
   title: string;
   defaultOpen?: boolean;
@@ -111,6 +121,29 @@ function downloadJson(filename: string, obj: unknown) {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+}
+
+function Sparkline(props: { points: SeriesPoint[]; height?: number }) {
+  const h = props.height ?? 36;
+  const w = 180;
+  const pts = props.points.slice(-60);
+  if (pts.length < 2) {
+    return <div className="h-[36px] w-[180px] rounded-md border border-slate-800 bg-slate-950" />;
+  }
+  const min = Math.min(...pts.map((p) => p.value));
+  const max = Math.max(...pts.map((p) => p.value));
+  const span = Math.max(1e-9, max - min);
+  const coords = pts.map((p, i) => {
+    const x = (i / (pts.length - 1)) * (w - 2) + 1;
+    const y = h - 1 - ((p.value - min) / span) * (h - 2);
+    return { x, y };
+  });
+  const d = coords.map((c, i) => `${i === 0 ? "M" : "L"}${c.x.toFixed(2)},${c.y.toFixed(2)}`).join(" ");
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="rounded-md border border-slate-800 bg-slate-950">
+      <path d={d} fill="none" stroke="rgb(56 189 248)" strokeWidth="1.5" />
+    </svg>
+  );
 }
 
 function explorerSigUrl(sig: string, cluster: string) {
@@ -165,6 +198,9 @@ export function Dashboard() {
 
   const [fleetWallets, setFleetWallets] = useState<FleetWallet[]>([]);
   const [fleetItems, setFleetItems] = useState<FleetStatusItem[]>([]);
+  const [fleetMetrics, setFleetMetrics] = useState<FleetMetricsItem[]>([]);
+  const [fleetBalanceSeries, setFleetBalanceSeries] = useState<SeriesPoint[]>([]);
+  const [fleetTx24hSeries, setFleetTx24hSeries] = useState<SeriesPoint[]>([]);
 
   const logBoxRef = useRef<HTMLDivElement | null>(null);
 
@@ -307,6 +343,26 @@ export function Dashboard() {
     if (data.clusterLogs) setClusterLogs(data.clusterLogs as any);
   }, [backendBaseUrl, cluster, fleetWallets]);
 
+  const fetchFleetMetrics = useCallback(async () => {
+    if (fleetWallets.length === 0) return;
+    const owners = fleetWallets.map((w) => w.owner);
+    const res = await fetch(`${backendBaseUrl}/api/fleet-metrics`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cluster, owners })
+    });
+    if (!res.ok) throw new Error(`fleet-metrics failed (${res.status})`);
+    const data = (await res.json()) as { metrics?: FleetMetricsItem[] };
+    if (Array.isArray(data.metrics)) {
+      setFleetMetrics(data.metrics);
+      const ts = Date.now();
+      const totalBal = data.metrics.reduce((a, m) => a + (Number(m.balanceSol) || 0), 0);
+      const totalTx24h = data.metrics.reduce((a, m) => a + (Number(m.txCount24h) || 0), 0);
+      setFleetBalanceSeries((prev) => [...prev.slice(-59), { ts, value: totalBal }]);
+      setFleetTx24hSeries((prev) => [...prev.slice(-59), { ts, value: totalTx24h }]);
+    }
+  }, [backendBaseUrl, cluster, fleetWallets]);
+
   useEffect(() => {
     let t: ReturnType<typeof setInterval> | undefined;
     let stopped = false;
@@ -383,6 +439,44 @@ export function Dashboard() {
       document.removeEventListener("visibilitychange", onVis);
     };
   }, [fetchFleetStatus, fleetWallets.length]);
+
+  useEffect(() => {
+    if (fleetWallets.length === 0) return;
+    let t: ReturnType<typeof setInterval> | undefined;
+    let stopped = false;
+    let inFlight = false;
+    const intervalMs = 12_000;
+
+    const tick = async () => {
+      if (stopped) return;
+      if (document.visibilityState === "hidden") return;
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fetchFleetMetrics();
+      } catch {
+        // keep last known UI
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const onVis = () => {
+      if (document.visibilityState !== "hidden") tick().catch(() => {});
+    };
+
+    (async () => {
+      await tick();
+      t = setInterval(() => tick().catch(() => {}), intervalMs);
+    })();
+
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      stopped = true;
+      if (t) clearInterval(t);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [fetchFleetMetrics, fleetWallets.length]);
 
   useEffect(() => {
     // Auto-scroll logs to bottom
@@ -1029,6 +1123,33 @@ export function Dashboard() {
                         </div>
                       </div>
 
+                      <div className="mt-3 grid grid-cols-1 gap-3 rounded-md border border-slate-800 bg-slate-950 p-3 sm:grid-cols-2">
+                        <div>
+                          <div className="flex items-center justify-between">
+                            <div className="text-xs font-semibold text-slate-200">Total SOL balance</div>
+                            <div className="text-xs text-slate-300">
+                              {(fleetMetrics.reduce((a, m) => a + (Number(m.balanceSol) || 0), 0) || 0).toFixed(3)}
+                            </div>
+                          </div>
+                          <div className="mt-2">
+                            <Sparkline points={fleetBalanceSeries} />
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-500">Last ~60 samples</div>
+                        </div>
+                        <div>
+                          <div className="flex items-center justify-between">
+                            <div className="text-xs font-semibold text-slate-200">Tx count (last 24h)</div>
+                            <div className="text-xs text-slate-300">
+                              {fleetMetrics.reduce((a, m) => a + (Number(m.txCount24h) || 0), 0) || 0}
+                            </div>
+                          </div>
+                          <div className="mt-2">
+                            <Sparkline points={fleetTx24hSeries} />
+                          </div>
+                          <div className="mt-1 text-[11px] text-slate-500">Based on last 100 signatures per wallet</div>
+                        </div>
+                      </div>
+
                     <div className="mt-3 overflow-x-auto rounded-md border border-slate-800 bg-slate-950">
                       <table className="min-w-[760px] text-left text-xs">
                         <thead className="border-b border-slate-800 text-slate-400">
@@ -1036,12 +1157,16 @@ export function Dashboard() {
                             <th className="px-3 py-2">Owner</th>
                             <th className="px-3 py-2">Running</th>
                             <th className="px-3 py-2">Pending</th>
+                              <th className="px-3 py-2">Balance (SOL)</th>
+                              <th className="px-3 py-2">Tx (24h)</th>
+                              <th className="px-3 py-2">Tx (last 100)</th>
                             <th className="px-3 py-2">Last log</th>
                           </tr>
                         </thead>
                         <tbody>
                           {(fleetItems.length ? fleetItems : fleetWallets.map((w) => ({ owner: w.owner } as any))).map(
                             (it: FleetStatusItem, idx: number) => {
+                              const m = fleetMetrics.find((x) => x.owner === it.owner);
                               const pending = Boolean(it.pendingAction);
                               return (
                                 <tr key={`${it.owner}-${idx}`} className="border-b border-slate-900">
@@ -1052,6 +1177,9 @@ export function Dashboard() {
                                   <td className="px-3 py-2 text-slate-200">
                                     {pending ? <span className="text-amber-200">yes</span> : "no"}
                                   </td>
+                                  <td className="px-3 py-2 text-slate-200">{m ? m.balanceSol.toFixed(4) : "-"}</td>
+                                  <td className="px-3 py-2 text-slate-200">{m ? m.txCount24h : "-"}</td>
+                                  <td className="px-3 py-2 text-slate-200">{m ? m.txCountRecent : "-"}</td>
                                   <td className="px-3 py-2 text-slate-400">
                                     {it.lastLog ? `${it.lastLog.level.toUpperCase()} ${it.lastLog.msg}` : "-"}
                                   </td>

@@ -12,6 +12,7 @@ import {
 import { buildUnsignedBuyLikeTxBase64, buildUnsignedSellLikeTxBase64 } from "../services/txBuilder.js";
 import { base64ToBytes, bytesToBase58 } from "../utils/encoding.js";
 import { jito } from "../services/jito.js";
+import { getWalletMetricsBatch } from "../services/walletMetrics.js";
 
 const router = Router();
 
@@ -206,6 +207,28 @@ router.post("/status-batch", async (req, res) => {
     clusterLogs: runtime.clusterLogs,
     items
   });
+});
+
+router.post("/fleet-metrics", async (req, res) => {
+  const parsed = z
+    .object({
+      cluster: clusterSchema.default("mainnet-beta"),
+      owners: z.array(ownerSchema).min(1).max(50)
+    })
+    .safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+
+  try {
+    const metrics = await getWalletMetricsBatch({
+      cluster: parsed.data.cluster,
+      owners: parsed.data.owners,
+      ttlMs: 20_000,
+      sigLimit: 100
+    });
+    return res.json({ ok: true, cluster: parsed.data.cluster, metrics });
+  } catch (e: any) {
+    return res.status(500).json({ error: e?.message ?? "fleet-metrics failed" });
+  }
 });
 
 router.post("/prepare-buy", async (req, res) => {
