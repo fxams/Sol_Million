@@ -62,6 +62,23 @@ router.post("/start-monitoring", async (req, res) => {
   return res.json({ ok: true });
 });
 
+router.post("/start-monitoring-batch", async (req, res) => {
+  const parsed = configSchema
+    .extend({ owners: z.array(ownerSchema).min(1).max(200) })
+    .safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+  const { owners, ...config } = parsed.data;
+
+  for (const owner of owners) {
+    pushSessionLog(config.cluster, owner, "info", `Start requested (batch). mode=${config.mode} mev=${config.mevEnabled}`);
+    // sequential to avoid burst load on upstream services
+    // eslint-disable-next-line no-await-in-loop
+    await startWalletSession(owner, config);
+  }
+
+  return res.json({ ok: true, started: owners.length });
+});
+
 router.post("/stop-monitoring", async (req, res) => {
   const parsed = z
     .object({ cluster: clusterSchema.default("mainnet-beta"), owner: ownerSchema })
@@ -69,6 +86,23 @@ router.post("/stop-monitoring", async (req, res) => {
   if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
   await stopWalletSession(parsed.data.cluster, parsed.data.owner);
   return res.json({ ok: true });
+});
+
+router.post("/stop-monitoring-batch", async (req, res) => {
+  const parsed = z
+    .object({
+      cluster: clusterSchema.default("mainnet-beta"),
+      owners: z.array(ownerSchema).min(1).max(200)
+    })
+    .safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+  const { cluster, owners } = parsed.data;
+
+  for (const owner of owners) {
+    // eslint-disable-next-line no-await-in-loop
+    await stopWalletSession(cluster, owner);
+  }
+  return res.json({ ok: true, stopped: owners.length });
 });
 
 router.get("/status", async (req, res) => {
@@ -135,6 +169,42 @@ router.get("/status", async (req, res) => {
     bundles,
     pendingAction: session.pendingAction,
     sessions
+  });
+});
+
+router.post("/status-batch", async (req, res) => {
+  const parsed = z
+    .object({
+      cluster: clusterSchema.default("mainnet-beta"),
+      owners: z.array(ownerSchema).min(1).max(200)
+    })
+    .safeParse(req.body ?? {});
+  if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
+
+  const { cluster, owners } = parsed.data;
+  const runtime = state[cluster];
+
+  const items = owners.map((owner) => {
+    const s = getOrCreateSession(cluster, owner);
+    const lastLog = s.logs.length ? s.logs[s.logs.length - 1] : null;
+    return {
+      owner,
+      running: s.running,
+      mode: s.config?.mode ?? null,
+      pumpFunPhase: s.config?.pumpFunPhase ?? null,
+      mevEnabled: s.config?.mevEnabled ?? null,
+      pendingAction: s.pendingAction
+        ? { type: s.pendingAction.type, reason: s.pendingAction.reason }
+        : null,
+      lastLog
+    };
+  });
+
+  return res.json({
+    ok: true,
+    cluster,
+    clusterLogs: runtime.clusterLogs,
+    items
   });
 });
 

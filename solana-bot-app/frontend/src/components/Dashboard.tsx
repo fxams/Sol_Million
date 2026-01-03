@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import toast from "react-hot-toast";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { VersionedTransaction } from "@solana/web3.js";
+import { Keypair, VersionedTransaction } from "@solana/web3.js";
 import clsx from "clsx";
 import { Buffer } from "buffer";
 
@@ -51,6 +51,21 @@ type BotStatus = {
   }[];
 };
 
+type FleetWallet = {
+  owner: string; // pubkey base58
+  secretKey: number[]; // Uint8Array serialized as number[]
+};
+
+type FleetStatusItem = {
+  owner: string;
+  running: boolean;
+  mode: BotMode | null;
+  pumpFunPhase: PumpFunPhase | null;
+  mevEnabled: boolean | null;
+  pendingAction: { type: "SIGN_AND_BUNDLE"; reason: string } | null;
+  lastLog: { ts: number; level: "info" | "warn" | "error"; msg: string } | null;
+};
+
 function CollapsibleCard(props: {
   title: string;
   defaultOpen?: boolean;
@@ -84,6 +99,18 @@ function CollapsibleCard(props: {
 
 function getBackendBaseUrl() {
   return (process.env.NEXT_PUBLIC_BACKEND_URL ?? "http://localhost:8787").replace(/\/$/, "");
+}
+
+function downloadJson(filename: string, obj: unknown) {
+  const blob = new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function explorerSigUrl(sig: string, cluster: string) {
@@ -135,6 +162,9 @@ export function Dashboard() {
   const [bundles, setBundles] = useState<BundleStatus[]>([]);
   const [pendingAction, setPendingAction] = useState<PendingAction>(null);
   const [sessions, setSessions] = useState<BotStatus["sessions"]>([]);
+
+  const [fleetWallets, setFleetWallets] = useState<FleetWallet[]>([]);
+  const [fleetItems, setFleetItems] = useState<FleetStatusItem[]>([]);
 
   const logBoxRef = useRef<HTMLDivElement | null>(null);
 
@@ -262,6 +292,21 @@ export function Dashboard() {
     setSessions(data.sessions ?? []);
   }, [backendBaseUrl, cluster, wallet.publicKey]);
 
+  const fetchFleetStatus = useCallback(async () => {
+    if (fleetWallets.length === 0) return;
+    const owners = fleetWallets.map((w) => w.owner);
+    const res = await fetch(`${backendBaseUrl}/api/status-batch`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ cluster, owners })
+    });
+    if (!res.ok) throw new Error(`status-batch failed (${res.status})`);
+    const data = (await res.json()) as { items?: FleetStatusItem[]; clusterLogs?: any[] };
+    if (Array.isArray(data.items)) setFleetItems(data.items);
+    // cluster logs can always be updated
+    if (data.clusterLogs) setClusterLogs(data.clusterLogs as any);
+  }, [backendBaseUrl, cluster, fleetWallets]);
+
   useEffect(() => {
     let t: ReturnType<typeof setInterval> | undefined;
     let stopped = false;
@@ -302,6 +347,44 @@ export function Dashboard() {
   }, [fetchStatus]);
 
   useEffect(() => {
+    if (fleetWallets.length === 0) return;
+    let t: ReturnType<typeof setInterval> | undefined;
+    let stopped = false;
+    let inFlight = false;
+    const intervalMs = 5000;
+
+    const tick = async () => {
+      if (stopped) return;
+      if (document.visibilityState === "hidden") return;
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        await fetchFleetStatus();
+      } catch {
+        // keep last known UI
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    const onVis = () => {
+      if (document.visibilityState !== "hidden") tick().catch(() => {});
+    };
+
+    (async () => {
+      await tick();
+      t = setInterval(() => tick().catch(() => {}), intervalMs);
+    })();
+
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      stopped = true;
+      if (t) clearInterval(t);
+      document.removeEventListener("visibilitychange", onVis);
+    };
+  }, [fetchFleetStatus, fleetWallets.length]);
+
+  useEffect(() => {
     // Auto-scroll logs to bottom
     const el = logBoxRef.current;
     if (!el) return;
@@ -330,6 +413,65 @@ export function Dashboard() {
       setLoading(false);
     }
   }, [backendBaseUrl, configPayload, fetchStatus, wallet.publicKey]);
+
+  const generateFleet = useCallback((n: number) => {
+    const wallets: FleetWallet[] = [];
+    for (let i = 0; i < n; i++) {
+      const kp = Keypair.generate();
+      wallets.push({
+        owner: kp.publicKey.toBase58(),
+        secretKey: Array.from(kp.secretKey)
+      });
+    }
+    setFleetWallets(wallets);
+    setFleetItems([]);
+    toast.success(`Generated ${n} wallets (local only)`);
+  }, []);
+
+  const startFleet = useCallback(async () => {
+    if (fleetWallets.length === 0) {
+      toast.error("Generate wallets first");
+      return;
+    }
+    setLoading(true);
+    try {
+      const owners = fleetWallets.map((w) => w.owner);
+      const res = await fetch(`${backendBaseUrl}/api/start-monitoring-batch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ...configPayload, owners })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `start batch failed (${res.status})`);
+      toast.success(`Started ${data?.started ?? owners.length} sessions`);
+      await fetchFleetStatus();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to start fleet");
+    } finally {
+      setLoading(false);
+    }
+  }, [backendBaseUrl, configPayload, fetchFleetStatus, fleetWallets]);
+
+  const stopFleet = useCallback(async () => {
+    if (fleetWallets.length === 0) return;
+    setLoading(true);
+    try {
+      const owners = fleetWallets.map((w) => w.owner);
+      const res = await fetch(`${backendBaseUrl}/api/stop-monitoring-batch`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ cluster, owners })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.error ?? `stop batch failed (${res.status})`);
+      toast.success(`Stopped ${data?.stopped ?? owners.length} sessions`);
+      await fetchFleetStatus();
+    } catch (e: any) {
+      toast.error(e?.message ?? "Failed to stop fleet");
+    } finally {
+      setLoading(false);
+    }
+  }, [backendBaseUrl, cluster, fetchFleetStatus, fleetWallets]);
 
   const stopBot = useCallback(async () => {
     if (!wallet.publicKey) {
@@ -795,6 +937,125 @@ export function Dashboard() {
                 </div>
               </details>
             )}
+
+            <div className="mt-4">
+              <details className="group rounded-lg border border-slate-800 bg-slate-950">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm text-slate-200 [&::-webkit-details-marker]:hidden">
+                  <div className="flex items-center gap-2">
+                    <span className="text-slate-500 transition-transform group-open:rotate-90">›</span>
+                    <span className="font-semibold text-slate-200">Wallet fleet</span>
+                  </div>
+                  <span className="text-xs text-slate-400">{fleetWallets.length || 0}</span>
+                </summary>
+                <div className="px-3 pb-3 pt-1">
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
+                      disabled={loading}
+                      type="button"
+                      onClick={() => generateFleet(20)}
+                    >
+                      Generate 20 wallets
+                    </button>
+                    <button
+                      className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
+                      disabled={loading || fleetWallets.length === 0}
+                      type="button"
+                      onClick={() =>
+                        downloadJson(`wallet-fleet-${cluster}-${Date.now()}.json`, {
+                          cluster,
+                          createdAt: new Date().toISOString(),
+                          wallets: fleetWallets
+                        })
+                      }
+                    >
+                      Download keys (JSON)
+                    </button>
+                    <button
+                      className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
+                      disabled={loading || fleetWallets.length === 0}
+                      type="button"
+                      onClick={() => {
+                        setFleetWallets([]);
+                        setFleetItems([]);
+                      }}
+                    >
+                      Clear
+                    </button>
+                    <button
+                      className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-60"
+                      disabled={loading || fleetWallets.length === 0}
+                      type="button"
+                      onClick={startFleet}
+                    >
+                      Start all
+                    </button>
+                    <button
+                      className="rounded-md bg-rose-600 px-3 py-2 text-xs font-semibold text-slate-50 disabled:opacity-60"
+                      disabled={loading || fleetWallets.length === 0}
+                      type="button"
+                      onClick={stopFleet}
+                    >
+                      Stop all
+                    </button>
+                  </div>
+
+                  <div className="mt-2 text-xs text-slate-400">
+                    Wallets are generated in your browser. The backend only receives public keys. Download the JSON if
+                    you need to import these wallets later (refreshing will lose them).
+                  </div>
+
+                  {fleetWallets.length > 0 && (
+                    <div className="mt-3 overflow-x-auto rounded-md border border-slate-800 bg-slate-950">
+                      <table className="min-w-[760px] text-left text-xs">
+                        <thead className="border-b border-slate-800 text-slate-400">
+                          <tr>
+                            <th className="px-3 py-2">Owner</th>
+                            <th className="px-3 py-2">Running</th>
+                            <th className="px-3 py-2">Pending</th>
+                            <th className="px-3 py-2">Last log</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(fleetItems.length ? fleetItems : fleetWallets.map((w) => ({ owner: w.owner } as any))).map(
+                            (it: FleetStatusItem, idx: number) => {
+                              const short = `${it.owner.slice(0, 4)}…${it.owner.slice(-4)}`;
+                              const pending = Boolean(it.pendingAction);
+                              return (
+                                <tr key={`${it.owner}-${idx}`} className="border-b border-slate-900">
+                                  <td className="px-3 py-2 font-mono text-[11px] text-slate-200">
+                                    <button
+                                      className="text-sky-300 hover:underline"
+                                      type="button"
+                                      onClick={() => {
+                                        navigator.clipboard?.writeText?.(it.owner).then(
+                                          () => toast.success("Copied owner"),
+                                          () => toast.error("Copy failed")
+                                        );
+                                      }}
+                                      title="Click to copy"
+                                    >
+                                      {short}
+                                    </button>
+                                  </td>
+                                  <td className="px-3 py-2 text-slate-200">{it.running ? "yes" : "no"}</td>
+                                  <td className="px-3 py-2 text-slate-200">
+                                    {pending ? <span className="text-amber-200">yes</span> : "no"}
+                                  </td>
+                                  <td className="px-3 py-2 text-slate-400">
+                                    {it.lastLog ? `${it.lastLog.level.toUpperCase()} ${it.lastLog.msg}` : "-"}
+                                  </td>
+                                </tr>
+                              );
+                            }
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              </details>
+            </div>
 
             <div className="mt-4">
               <details className="group rounded-lg border border-slate-800 bg-slate-950">
