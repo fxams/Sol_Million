@@ -80,15 +80,19 @@ function CollapsibleCard(props: {
   title: string;
   defaultOpen?: boolean;
   right?: React.ReactNode;
+  className?: string;
   children: React.ReactNode;
 }) {
+  const [open, setOpen] = useState(Boolean(props.defaultOpen));
   return (
     <details
       className={clsx(
         "group rounded-xl border border-slate-800 bg-slate-900/50",
-        "open:shadow-[0_0_0_1px_rgba(148,163,184,0.08)]"
+        "open:shadow-[0_0_0_1px_rgba(148,163,184,0.08)]",
+        props.className
       )}
-      open={props.defaultOpen ?? false}
+      open={open}
+      onToggle={(e) => setOpen((e.currentTarget as HTMLDetailsElement).open)}
     >
       <summary
         className={clsx(
@@ -143,6 +147,37 @@ function Sparkline(props: { points: SeriesPoint[]; height?: number }) {
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="rounded-md border border-slate-800 bg-slate-950">
       <path d={d} fill="none" stroke="rgb(56 189 248)" strokeWidth="1.5" />
     </svg>
+  );
+}
+
+function TabButton(props: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={props.onClick}
+      className={clsx(
+        "rounded-md px-3 py-2 text-sm font-semibold transition",
+        props.active
+          ? "bg-slate-100 text-slate-900"
+          : "text-slate-200 hover:bg-slate-800/60"
+      )}
+    >
+      {props.children}
+    </button>
+  );
+}
+
+function KpiCard(props: { label: string; value: React.ReactNode; sub?: React.ReactNode }) {
+  return (
+    <div className="rounded-xl border border-slate-800 bg-slate-900/40 px-3 py-2">
+      <div className="text-[11px] text-slate-400">{props.label}</div>
+      <div className="mt-0.5 text-sm font-semibold text-slate-100">{props.value}</div>
+      {props.sub ? <div className="mt-0.5 text-[11px] text-slate-400">{props.sub}</div> : null}
+    </div>
   );
 }
 
@@ -203,6 +238,15 @@ export function Dashboard() {
   const [fleetMetrics, setFleetMetrics] = useState<FleetMetricsItem[]>([]);
   const [fleetBalanceSeries, setFleetBalanceSeries] = useState<SeriesPoint[]>([]);
   const [fleetTx24hSeries, setFleetTx24hSeries] = useState<SeriesPoint[]>([]);
+
+  const fleetTotals = useMemo(() => {
+    const totalWallets = fleetWallets.length;
+    const runningCount = (fleetItems ?? []).filter((x) => x.running).length;
+    const pendingCount = (fleetItems ?? []).filter((x) => Boolean(x.pendingAction)).length;
+    const totalSol = (fleetMetrics ?? []).reduce((a, m) => a + (Number(m.balanceSol) || 0), 0);
+    const totalTx24h = (fleetMetrics ?? []).reduce((a, m) => a + (Number(m.txCount24h) || 0), 0);
+    return { totalWallets, runningCount, pendingCount, totalSol, totalTx24h };
+  }, [fleetItems, fleetMetrics, fleetWallets.length]);
 
   const logBoxRef = useRef<HTMLDivElement | null>(null);
 
@@ -742,7 +786,40 @@ export function Dashboard() {
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
+        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <div className="inline-flex w-full items-center justify-between rounded-xl border border-slate-800 bg-slate-900/50 p-1 sm:w-auto sm:justify-start">
+            <div className="inline-flex gap-1">
+              <TabButton active={activeTab === "bot"} onClick={() => setActiveTab("bot")}>
+                Bot
+              </TabButton>
+              <TabButton active={activeTab === "fleet"} onClick={() => setActiveTab("fleet")}>
+                Wallet Fleet
+              </TabButton>
+            </div>
+            <div className="hidden sm:block" />
+          </div>
+
+          {activeTab === "bot" ? (
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <KpiCard label="Status" value={running ? "Running" : "Stopped"} />
+              <KpiCard label="Mode" value={mode} />
+              <KpiCard label="Pending action" value={pendingAction ? "Yes" : "No"} />
+              <KpiCard label="MEV" value={mevEnabled ? "On" : "Off"} sub={cluster === "devnet" ? "Devnet: bundles off" : undefined} />
+            </div>
+          ) : (
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+              <KpiCard label="Wallets" value={fleetTotals.totalWallets} />
+              <KpiCard label="Running" value={fleetTotals.runningCount} />
+              <KpiCard label="Pending" value={fleetTotals.pendingCount} />
+              <KpiCard label="Total SOL" value={fleetTotals.totalSol.toFixed(3)} />
+              <KpiCard label="Tx (24h)" value={fleetTotals.totalTx24h} />
+            </div>
+          )}
+        </div>
+
+        {activeTab === "bot" ? (
+        <>
+        <div className="mt-4 grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
           <CollapsibleCard
             title="Bot configuration"
             defaultOpen
@@ -1037,170 +1114,6 @@ export function Dashboard() {
             )}
 
             <div className="mt-4">
-              <details className="group rounded-lg border border-slate-800 bg-slate-950" open={fleetWallets.length > 0}>
-                <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm text-slate-200 [&::-webkit-details-marker]:hidden">
-                  <div className="flex items-center gap-2">
-                    <span className="text-slate-500 transition-transform group-open:rotate-90">›</span>
-                    <span className="font-semibold text-slate-200">Wallet fleet</span>
-                  </div>
-                  <span className="text-xs text-slate-400">{fleetWallets.length || 0}</span>
-                </summary>
-                <div className="px-3 pb-3 pt-1">
-                  <div className="flex flex-wrap gap-2">
-                    <button
-                      className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
-                      disabled={loading}
-                      type="button"
-                      onClick={() => generateFleet(20)}
-                    >
-                      Generate 20 wallets
-                    </button>
-                    <button
-                      className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
-                      disabled={loading || fleetWallets.length === 0}
-                      type="button"
-                      onClick={() =>
-                        downloadJson(`wallet-fleet-${cluster}-${Date.now()}.json`, {
-                          cluster,
-                          createdAt: new Date().toISOString(),
-                          wallets: fleetWallets
-                        })
-                      }
-                    >
-                      Download keys (JSON)
-                    </button>
-                    <button
-                      className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
-                      disabled={loading || fleetWallets.length === 0}
-                      type="button"
-                      onClick={() => {
-                        setFleetWallets([]);
-                        setFleetItems([]);
-                      }}
-                    >
-                      Clear
-                    </button>
-                    <button
-                      className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-60"
-                      disabled={loading || fleetWallets.length === 0}
-                      type="button"
-                      onClick={startFleet}
-                    >
-                      Start all
-                    </button>
-                    <button
-                      className="rounded-md bg-rose-600 px-3 py-2 text-xs font-semibold text-slate-50 disabled:opacity-60"
-                      disabled={loading || fleetWallets.length === 0}
-                      type="button"
-                      onClick={stopFleet}
-                    >
-                      Stop all
-                    </button>
-                  </div>
-
-                  <div className="mt-2 text-xs text-slate-400">
-                    Wallets are generated in your browser. The backend only receives public keys. Download the JSON if
-                    you need to import these wallets later (refreshing will lose them).
-                  </div>
-
-                  {fleetWallets.length > 0 && (
-                    <>
-                      <div className="mt-3 rounded-md border border-slate-800 bg-slate-950 p-2">
-                        <div className="text-xs font-semibold text-slate-200">Fleet addresses</div>
-                        <div className="mt-1 grid grid-cols-1 gap-1 text-[11px] text-slate-300 sm:grid-cols-2">
-                          {fleetWallets.map((w) => (
-                            <button
-                              key={w.owner}
-                              type="button"
-                              className="truncate rounded-md border border-slate-800 bg-slate-950 px-2 py-1 text-left font-mono text-sky-200 hover:bg-slate-900"
-                              title="Click to copy full address"
-                              onClick={() => {
-                                navigator.clipboard?.writeText?.(w.owner).then(
-                                  () => toast.success("Copied address"),
-                                  () => toast.error("Copy failed")
-                                );
-                              }}
-                            >
-                              {w.owner}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-
-                      <div className="mt-3 grid grid-cols-1 gap-3 rounded-md border border-slate-800 bg-slate-950 p-3 sm:grid-cols-2">
-                        <div>
-                          <div className="flex items-center justify-between">
-                            <div className="text-xs font-semibold text-slate-200">Total SOL balance</div>
-                            <div className="text-xs text-slate-300">
-                              {(fleetMetrics.reduce((a, m) => a + (Number(m.balanceSol) || 0), 0) || 0).toFixed(3)}
-                            </div>
-                          </div>
-                          <div className="mt-2">
-                            <Sparkline points={fleetBalanceSeries} />
-                          </div>
-                          <div className="mt-1 text-[11px] text-slate-500">Last ~60 samples</div>
-                        </div>
-                        <div>
-                          <div className="flex items-center justify-between">
-                            <div className="text-xs font-semibold text-slate-200">Tx count (last 24h)</div>
-                            <div className="text-xs text-slate-300">
-                              {fleetMetrics.reduce((a, m) => a + (Number(m.txCount24h) || 0), 0) || 0}
-                            </div>
-                          </div>
-                          <div className="mt-2">
-                            <Sparkline points={fleetTx24hSeries} />
-                          </div>
-                          <div className="mt-1 text-[11px] text-slate-500">Based on last 100 signatures per wallet</div>
-                        </div>
-                      </div>
-
-                    <div className="mt-3 overflow-x-auto rounded-md border border-slate-800 bg-slate-950">
-                      <table className="min-w-[760px] text-left text-xs">
-                        <thead className="border-b border-slate-800 text-slate-400">
-                          <tr>
-                            <th className="px-3 py-2">Owner</th>
-                            <th className="px-3 py-2">Running</th>
-                            <th className="px-3 py-2">Pending</th>
-                              <th className="px-3 py-2">Balance (SOL)</th>
-                              <th className="px-3 py-2">Tx (24h)</th>
-                              <th className="px-3 py-2">Tx (last 100)</th>
-                            <th className="px-3 py-2">Last log</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {(fleetItems.length ? fleetItems : fleetWallets.map((w) => ({ owner: w.owner } as any))).map(
-                            (it: FleetStatusItem, idx: number) => {
-                              const m = fleetMetrics.find((x) => x.owner === it.owner);
-                              const pending = Boolean(it.pendingAction);
-                              return (
-                                <tr key={`${it.owner}-${idx}`} className="border-b border-slate-900">
-                                  <td className="px-3 py-2 font-mono text-[11px] text-slate-200" title={it.owner}>
-                                    <span className="inline-block max-w-[360px] truncate">{it.owner}</span>
-                                  </td>
-                                  <td className="px-3 py-2 text-slate-200">{it.running ? "yes" : "no"}</td>
-                                  <td className="px-3 py-2 text-slate-200">
-                                    {pending ? <span className="text-amber-200">yes</span> : "no"}
-                                  </td>
-                                  <td className="px-3 py-2 text-slate-200">{m ? m.balanceSol.toFixed(4) : "-"}</td>
-                                  <td className="px-3 py-2 text-slate-200">{m ? m.txCount24h : "-"}</td>
-                                  <td className="px-3 py-2 text-slate-200">{m ? m.txCountRecent : "-"}</td>
-                                  <td className="px-3 py-2 text-slate-400">
-                                    {it.lastLog ? `${it.lastLog.level.toUpperCase()} ${it.lastLog.msg}` : "-"}
-                                  </td>
-                                </tr>
-                              );
-                            }
-                          )}
-                        </tbody>
-                      </table>
-                    </div>
-                    </>
-                  )}
-                </div>
-              </details>
-            </div>
-
-            <div className="mt-4">
               <details className="group rounded-lg border border-slate-800 bg-slate-950">
                 <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-3 py-2 text-sm text-slate-200 [&::-webkit-details-marker]:hidden">
                   <div className="flex items-center gap-2">
@@ -1472,6 +1385,146 @@ export function Dashboard() {
           </div>
           </CollapsibleCard>
         </div>
+        </>
+        ) : (
+          <div className="mt-4 space-y-4 sm:space-y-6">
+            <div className="grid grid-cols-1 gap-4 sm:gap-6">
+              <CollapsibleCard title="Wallet fleet — stats & management" defaultOpen>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
+                    disabled={loading}
+                    type="button"
+                    onClick={() => generateFleet(20)}
+                  >
+                    Generate 20 wallets
+                  </button>
+                  <button
+                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
+                    disabled={loading || fleetWallets.length === 0}
+                    type="button"
+                    onClick={() =>
+                      downloadJson(`wallet-fleet-${cluster}-${Date.now()}.json`, {
+                        cluster,
+                        createdAt: new Date().toISOString(),
+                        wallets: fleetWallets
+                      })
+                    }
+                  >
+                    Download keys (JSON)
+                  </button>
+                  <button
+                    className="rounded-md bg-emerald-600 px-3 py-2 text-xs font-semibold text-slate-950 disabled:opacity-60"
+                    disabled={loading || fleetWallets.length === 0}
+                    type="button"
+                    onClick={startFleet}
+                  >
+                    Start all
+                  </button>
+                  <button
+                    className="rounded-md bg-rose-600 px-3 py-2 text-xs font-semibold text-slate-50 disabled:opacity-60"
+                    disabled={loading || fleetWallets.length === 0}
+                    type="button"
+                    onClick={stopFleet}
+                  >
+                    Stop all
+                  </button>
+                  <button
+                    className="rounded-md border border-slate-700 bg-slate-950 px-3 py-2 text-xs font-semibold text-slate-200 disabled:opacity-60"
+                    disabled={loading || fleetWallets.length === 0}
+                    type="button"
+                    onClick={() => {
+                      setFleetWallets([]);
+                      setFleetItems([]);
+                      setFleetMetrics([]);
+                      setFleetBalanceSeries([]);
+                      setFleetTx24hSeries([]);
+                    }}
+                  >
+                    Clear
+                  </button>
+                </div>
+
+                <div className="mt-2 text-xs text-slate-400">
+                  Wallets are generated in your browser. The backend only receives public keys. Download the JSON if you
+                  need to import these wallets later (refreshing will lose them).
+                </div>
+
+                {fleetWallets.length > 0 ? (
+                  <>
+                    <div className="mt-4 grid grid-cols-1 gap-3 rounded-xl border border-slate-800 bg-slate-950 p-3 sm:grid-cols-2">
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-slate-200">Total SOL balance</div>
+                          <div className="text-xs text-slate-300">{fleetTotals.totalSol.toFixed(3)}</div>
+                        </div>
+                        <div className="mt-2">
+                          <Sparkline points={fleetBalanceSeries} />
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-500">Last ~60 samples</div>
+                      </div>
+                      <div>
+                        <div className="flex items-center justify-between">
+                          <div className="text-xs font-semibold text-slate-200">Tx count (last 24h)</div>
+                          <div className="text-xs text-slate-300">{fleetTotals.totalTx24h}</div>
+                        </div>
+                        <div className="mt-2">
+                          <Sparkline points={fleetTx24hSeries} />
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-500">Based on last 100 signatures per wallet</div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 overflow-x-auto rounded-xl border border-slate-800 bg-slate-950">
+                      <table className="min-w-[980px] text-left text-xs">
+                        <thead className="border-b border-slate-800 text-slate-400">
+                          <tr>
+                            <th className="px-3 py-2">Owner</th>
+                            <th className="px-3 py-2">Running</th>
+                            <th className="px-3 py-2">Pending</th>
+                            <th className="px-3 py-2">Balance (SOL)</th>
+                            <th className="px-3 py-2">Tx (24h)</th>
+                            <th className="px-3 py-2">Tx (last 100)</th>
+                            <th className="px-3 py-2">Last log</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(fleetItems.length ? fleetItems : fleetWallets.map((w) => ({ owner: w.owner } as any))).map(
+                            (it: FleetStatusItem, idx: number) => {
+                              const m = fleetMetrics.find((x) => x.owner === it.owner);
+                              const pending = Boolean(it.pendingAction);
+                              return (
+                                <tr key={`${it.owner}-${idx}`} className="border-b border-slate-900">
+                                  <td className="px-3 py-2 font-mono text-[11px] text-slate-200" title={it.owner}>
+                                    <span className="inline-block max-w-[420px] truncate">{it.owner}</span>
+                                  </td>
+                                  <td className="px-3 py-2 text-slate-200">{it.running ? "yes" : "no"}</td>
+                                  <td className="px-3 py-2 text-slate-200">
+                                    {pending ? <span className="text-amber-200">yes</span> : "no"}
+                                  </td>
+                                  <td className="px-3 py-2 text-slate-200">{m ? m.balanceSol.toFixed(4) : "-"}</td>
+                                  <td className="px-3 py-2 text-slate-200">{m ? m.txCount24h : "-"}</td>
+                                  <td className="px-3 py-2 text-slate-200">{m ? m.txCountRecent : "-"}</td>
+                                  <td className="px-3 py-2 text-slate-400">
+                                    {it.lastLog ? `${it.lastLog.level.toUpperCase()} ${it.lastLog.msg}` : "-"}
+                                  </td>
+                                </tr>
+                              );
+                            }
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-4 rounded-xl border border-slate-800 bg-slate-950 p-4 text-sm text-slate-400">
+                    Generate a wallet fleet to see stats, charts, and controls.
+                  </div>
+                )}
+              </CollapsibleCard>
+            </div>
+          </div>
+        )}
       </div>
     </main>
   );
