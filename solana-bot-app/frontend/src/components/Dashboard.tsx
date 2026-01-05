@@ -975,59 +975,118 @@ export function Dashboard() {
 
   return (
     <main className="min-h-screen">
-      <div className="mx-auto max-w-6xl px-3 py-5 sm:px-4 sm:py-8">
-        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-          <div>
-            <div className="text-xl font-semibold tracking-tight sm:text-2xl">Solana Bot App</div>
-            <div className="text-xs text-slate-300 sm:text-sm">
-              Client-signed trades + optional MEV protection via Jito bundles
-            </div>
+      <div className="flex min-h-screen">
+        {/* Sidebar (desktop) */}
+        <aside className="hidden w-64 shrink-0 flex-col border-r border-slate-800 bg-slate-950/60 backdrop-blur lg:flex">
+          <div className="px-4 py-4">
+            <div className="text-sm font-semibold text-slate-100">Solana Bot</div>
+            <div className="mt-1 text-xs text-slate-400">Advanced dashboard</div>
           </div>
-          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
-            <select
-              className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm"
-              value={cluster}
-              onChange={(e) => setCluster(e.target.value as any)}
-              disabled={loading}
-              aria-label="cluster"
+          <nav className="px-2">
+            <button
+              type="button"
+              onClick={() => setActiveTab("bot")}
+              className={clsx(
+                "flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm",
+                activeTab === "bot" ? "bg-slate-900 text-slate-100" : "text-slate-300 hover:bg-slate-900/60"
+              )}
             >
-              <option value="mainnet-beta">mainnet-beta</option>
-              <option value="devnet">devnet</option>
-            </select>
-            <WalletMultiButton />
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-800 bg-slate-950 text-xs">
+                B
+              </span>
+              Bot
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("fleet")}
+              className={clsx(
+                "mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm",
+                activeTab === "fleet" ? "bg-slate-900 text-slate-100" : "text-slate-300 hover:bg-slate-900/60"
+              )}
+            >
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-800 bg-slate-950 text-xs">
+                F
+              </span>
+              Wallet Fleet
+            </button>
+          </nav>
+          <div className="mt-auto px-4 py-4 text-xs text-slate-500">
+            <div className="flex items-center justify-between">
+              <span>Cluster</span>
+              <span className="font-mono">{cluster}</span>
+            </div>
           </div>
-        </div>
+        </aside>
 
-        <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <div className="inline-flex w-full items-center justify-between rounded-xl border border-slate-800 bg-slate-900/50 p-1 sm:w-auto sm:justify-start">
-            <div className="inline-flex gap-1">
-              <TabButton active={activeTab === "bot"} onClick={() => setActiveTab("bot")}>
-                Bot
-              </TabButton>
-              <TabButton active={activeTab === "fleet"} onClick={() => setActiveTab("fleet")}>
-                Wallet Fleet
-              </TabButton>
-            </div>
-            <div className="hidden sm:block" />
-          </div>
+        <div className="flex min-w-0 flex-1 flex-col">
+          {/* Top bar */}
+          <header className="sticky top-0 z-20 border-b border-slate-800 bg-slate-950/80 backdrop-blur">
+            <div className="mx-auto max-w-7xl px-3 py-3 sm:px-4">
+              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-slate-100">
+                      {activeTab === "bot" ? "Bot workspace" : "Wallet fleet workspace"}
+                    </div>
+                    <div className="text-xs text-slate-400">
+                      {activeTab === "bot"
+                        ? "Configure, monitor, and execute trades"
+                        : "Manage wallets, funding, and metrics"}
+                    </div>
+                  </div>
+                  {/* Mobile nav */}
+                  <div className="inline-flex rounded-lg border border-slate-800 bg-slate-900/50 p-1 lg:hidden">
+                    <TabButton active={activeTab === "bot"} onClick={() => setActiveTab("bot")}>
+                      Bot
+                    </TabButton>
+                    <TabButton active={activeTab === "fleet"} onClick={() => setActiveTab("fleet")}>
+                      Fleet
+                    </TabButton>
+                  </div>
+                </div>
 
-          {activeTab === "bot" ? (
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-              <KpiCard label="Status" value={running ? "Running" : "Stopped"} />
-              <KpiCard label="Mode" value={mode} />
-              <KpiCard label="Pending action" value={pendingAction ? "Yes" : "No"} />
-              <KpiCard label="MEV" value={mevEnabled ? "On" : "Off"} sub={cluster === "devnet" ? "Devnet: bundles off" : undefined} />
+                <div className="flex flex-wrap items-center gap-2 sm:justify-end">
+                  <select
+                    className="rounded-md border border-slate-800 bg-slate-900 px-3 py-2 text-sm"
+                    value={cluster}
+                    onChange={(e) => setCluster(e.target.value as any)}
+                    disabled={loading}
+                    aria-label="cluster"
+                  >
+                    <option value="mainnet-beta">mainnet-beta</option>
+                    <option value="devnet">devnet</option>
+                  </select>
+                  <WalletMultiButton />
+                </div>
+              </div>
             </div>
-          ) : (
-            <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
-              <KpiCard label="Wallets" value={fleetTotals.totalWallets} />
-              <KpiCard label="Running" value={fleetTotals.runningCount} />
-              <KpiCard label="Pending" value={fleetTotals.pendingCount} />
-              <KpiCard label="Total SOL" value={fleetTotals.totalSol.toFixed(3)} />
-              <KpiCard label="Tx (24h)" value={fleetTotals.totalTx24h} />
+          </header>
+
+          <div className="mx-auto w-full max-w-7xl px-3 py-5 sm:px-4 sm:py-8">
+            {/* KPI strip */}
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
+              {activeTab === "bot" ? (
+                <>
+                  <KpiCard label="Status" value={running ? "Running" : "Stopped"} />
+                  <KpiCard label="Mode" value={mode} />
+                  <KpiCard label="Pending action" value={pendingAction ? "Yes" : "No"} />
+                  <KpiCard
+                    label="MEV"
+                    value={mevEnabled ? "On" : "Off"}
+                    sub={cluster === "devnet" ? "Devnet: bundles off" : undefined}
+                  />
+                  <KpiCard label="Sessions" value={(sessions ?? []).length} />
+                </>
+              ) : (
+                <>
+                  <KpiCard label="Wallets" value={fleetTotals.totalWallets} />
+                  <KpiCard label="Running" value={fleetTotals.runningCount} />
+                  <KpiCard label="Pending" value={fleetTotals.pendingCount} />
+                  <KpiCard label="Total SOL" value={fleetTotals.totalSol.toFixed(3)} />
+                  <KpiCard label="Tx (24h)" value={fleetTotals.totalTx24h} />
+                </>
+              )}
             </div>
-          )}
-        </div>
 
         {activeTab === "bot" ? (
         <>
@@ -1853,6 +1912,8 @@ export function Dashboard() {
             </div>
           </div>
         )}
+          </div>
+        </div>
       </div>
     </main>
   );
