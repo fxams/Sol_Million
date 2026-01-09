@@ -20,6 +20,7 @@ import {
   createTransferInstruction,
   getAssociatedTokenAddressSync
 } from "@solana/spl-token";
+import { AppFlowViz } from "./AppFlowViz";
 
 type BotMode = "snipe" | "volume";
 type PumpFunPhase = "pre" | "post";
@@ -1086,6 +1087,15 @@ export function Dashboard() {
                   <KpiCard label="Tx (24h)" value={fleetTotals.totalTx24h} />
                 </>
               )}
+            </div>
+
+            <div className="mt-4">
+              <AppFlowViz
+                backendBaseUrl={backendBaseUrl}
+                cluster={cluster}
+                owner={wallet.publicKey ? wallet.publicKey.toBase58() : null}
+                height={420}
+              />
             </div>
 
         {activeTab === "bot" ? (

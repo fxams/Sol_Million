@@ -3,7 +3,14 @@ import { z } from "zod";
 import { v4 as uuidv4 } from "uuid";
 import { VersionedTransaction, SystemProgram } from "@solana/web3.js";
 import bs58 from "bs58";
-import { getOrCreateSession, pushClusterLog, pushSessionLog, state } from "../state/store.js";
+import {
+  getOrCreateSession,
+  getRecentVizEvents,
+  pushClusterLog,
+  pushSessionLog,
+  state,
+  subscribeVizEvents
+} from "../state/store.js";
 import {
   materializePendingUnsignedTxsForSession,
   startWalletSession,
@@ -104,6 +111,50 @@ router.post("/stop-monitoring-batch", async (req, res) => {
     await stopWalletSession(cluster, owner);
   }
   return res.json({ ok: true, stopped: owners.length });
+});
+
+router.get("/viz/stream", (req, res) => {
+  const cluster = clusterSchema.catch("mainnet-beta").parse(req.query.cluster);
+  const owner = ownerSchema.optional().parse(req.query.owner);
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+
+  // Hint to reverse proxies (nginx) not to buffer SSE.
+  res.setHeader("X-Accel-Buffering", "no");
+
+  const write = (eventName: string | null, data: unknown) => {
+    if (eventName) res.write(`event: ${eventName}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  write("hello", { ts: Date.now(), cluster, owner: owner ?? null });
+
+  // Send a small backlog so the UI can "warm up" instantly.
+  const recent = getRecentVizEvents().filter((e) => {
+    if (e.cluster !== cluster) return false;
+    if (owner && e.owner !== owner) return false;
+    return true;
+  });
+  for (const e of recent) write(null, e);
+
+  const unsubscribe = subscribeVizEvents((e) => {
+    if (e.cluster !== cluster) return;
+    if (owner && e.owner !== owner) return;
+    write(null, e);
+  });
+
+  const keepAlive = setInterval(() => {
+    // Keep connections alive across load balancers.
+    write("ping", { ts: Date.now() });
+  }, 15_000);
+
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    unsubscribe();
+  });
 });
 
 router.get("/status", async (req, res) => {

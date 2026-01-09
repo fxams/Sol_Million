@@ -67,6 +67,32 @@ export type LogLine = {
   msg: string;
 };
 
+export type VizComponent =
+  | "frontend"
+  | "backend-api"
+  | "state-store"
+  | "helius-ws"
+  | "solana-rpc"
+  | "pumpfun"
+  | "raydium"
+  | "jupiter"
+  | "jito"
+  | "pumpportal"
+  | "tx-builder"
+  | "wallet-metrics"
+  | "other";
+
+export type VizEvent = {
+  id: string;
+  ts: number;
+  cluster: Cluster;
+  owner: string | null;
+  level: LogLine["level"];
+  msg: string;
+  kind: "cluster_log" | "session_log";
+  component: VizComponent;
+};
+
 export type PendingAction =
   | {
       type: "SIGN_AND_BUNDLE";
@@ -115,6 +141,51 @@ export type ClusterRuntime = {
 };
 
 const MAX_LOGS = 500;
+const MAX_VIZ_EVENTS = 250;
+
+const vizListeners = new Set<(evt: VizEvent) => void>();
+let vizSeq = 0;
+const vizRecent: VizEvent[] = [];
+
+function inferVizComponent(msg: string): VizComponent {
+  const m = msg.toLowerCase();
+  if (m.includes("wallet metrics") || m.includes("fleet-metrics")) return "wallet-metrics";
+  if (m.includes("connecting websocket") || m.includes("websocket") || m.includes("logssubscribe"))
+    return "helius-ws";
+  if (m.includes("raydium")) return "raydium";
+  if (m.includes("pump.fun") || m.includes("pumpfun")) return "pumpfun";
+  if (m.includes("pumpportal")) return "pumpportal";
+  if (m.includes("jupiter")) return "jupiter";
+  if (m.includes("jito") || m.includes("bundle")) return "jito";
+  if (m.includes("unsigned tx") || m.includes("blockhash") || m.includes("compute unit")) return "tx-builder";
+  if (m.includes("rpc") || m.includes("gettransaction") || m.includes("getaccountinfo")) return "solana-rpc";
+  if (m.includes("session started") || m.includes("session stopped") || m.includes("pending action")) return "backend-api";
+  return "other";
+}
+
+function publishVizEvent(evt: Omit<VizEvent, "id">) {
+  const full: VizEvent = { ...evt, id: `${Date.now().toString(36)}_${(vizSeq++).toString(36)}` };
+  vizRecent.push(full);
+  if (vizRecent.length > MAX_VIZ_EVENTS) {
+    vizRecent.splice(0, vizRecent.length - MAX_VIZ_EVENTS);
+  }
+  for (const l of vizListeners) {
+    try {
+      l(full);
+    } catch {
+      // ignore listener errors
+    }
+  }
+}
+
+export function subscribeVizEvents(listener: (evt: VizEvent) => void): () => void {
+  vizListeners.add(listener);
+  return () => vizListeners.delete(listener);
+}
+
+export function getRecentVizEvents(): VizEvent[] {
+  return vizRecent.slice();
+}
 
 function makeSession(owner: string): WalletSession {
   return {
@@ -160,11 +231,29 @@ export function pushClusterLog(cluster: Cluster, level: LogLine["level"], msg: s
   if (runtime.clusterLogs.length > MAX_LOGS) {
     runtime.clusterLogs.splice(0, runtime.clusterLogs.length - MAX_LOGS);
   }
+  publishVizEvent({
+    ts: Date.now(),
+    cluster,
+    owner: null,
+    level,
+    msg,
+    kind: "cluster_log",
+    component: inferVizComponent(msg)
+  });
 }
 
 export function pushSessionLog(cluster: Cluster, owner: string, level: LogLine["level"], msg: string) {
   const s = getOrCreateSession(cluster, owner);
   s.logs.push({ ts: Date.now(), level, msg });
   if (s.logs.length > MAX_LOGS) s.logs.splice(0, s.logs.length - MAX_LOGS);
+  publishVizEvent({
+    ts: Date.now(),
+    cluster,
+    owner,
+    level,
+    msg,
+    kind: "session_log",
+    component: inferVizComponent(msg)
+  });
 }
 
