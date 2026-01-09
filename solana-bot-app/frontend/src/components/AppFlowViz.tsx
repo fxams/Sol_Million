@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
@@ -12,32 +12,7 @@ import ReactFlow, {
   type Node,
   type NodeProps
 } from "reactflow";
-
-type VizComponent =
-  | "frontend"
-  | "backend-api"
-  | "state-store"
-  | "helius-ws"
-  | "solana-rpc"
-  | "pumpfun"
-  | "raydium"
-  | "jupiter"
-  | "jito"
-  | "pumpportal"
-  | "tx-builder"
-  | "wallet-metrics"
-  | "other";
-
-type VizEvent = {
-  id: string;
-  ts: number;
-  cluster: "mainnet-beta" | "devnet";
-  owner: string | null;
-  level: "info" | "warn" | "error";
-  msg: string;
-  kind: "cluster_log" | "session_log";
-  component: VizComponent;
-};
+import type { VizComponent, VizEvent } from "./useVizStream";
 
 type NodeId =
   | "wallet"
@@ -191,13 +166,18 @@ function makeEdges(): Edge[] {
 }
 
 export function AppFlowViz(props: {
-  backendBaseUrl: string;
   cluster: "mainnet-beta" | "devnet";
   owner?: string | null;
+  stream: {
+    connected: boolean;
+    lastEvent: VizEvent | null;
+    events: VizEvent[];
+  };
   height?: number;
 }) {
-  const [connected, setConnected] = useState(false);
-  const [lastEvent, setLastEvent] = useState<VizEvent | null>(null);
+  const connected = props.stream.connected;
+  const lastEvent = props.stream.lastEvent;
+  const events = props.stream.events;
   const [activity, setActivity] = useState<Record<NodeId, number>>({
     wallet: 0,
     frontend: 0,
@@ -212,7 +192,6 @@ export function AppFlowViz(props: {
     jito: 0
   });
   const [edgeActivity, setEdgeActivity] = useState<Record<string, number>>({});
-  const evRef = useRef<EventSource | null>(null);
 
   const nodesBase = useMemo(() => makeBaseNodes(props.cluster), [props.cluster]);
   const edgesBase = useMemo(() => makeEdges(), []);
@@ -274,54 +253,43 @@ export function AppFlowViz(props: {
   }, []);
 
   useEffect(() => {
-    const url = new URL(`${props.backendBaseUrl.replace(/\/$/, "")}/api/viz/stream`);
-    url.searchParams.set("cluster", props.cluster);
-    if (props.owner) url.searchParams.set("owner", props.owner);
+    if (events.length === 0) return;
+    const e = events[events.length - 1];
+    const node = COMPONENT_TO_NODE[e.component] ?? "backend";
+    setActivity((prev) => ({ ...prev, [node]: clamp01((prev[node] ?? 0) + 0.35) }));
 
-    // Close old connection when owner/cluster changes.
-    evRef.current?.close();
-    const es = new EventSource(url.toString());
-    evRef.current = es;
-
-    es.addEventListener("open", () => setConnected(true));
-    es.addEventListener("error", () => setConnected(false));
-
-    es.addEventListener("message", (ev) => {
-      try {
-        const e = JSON.parse((ev as MessageEvent).data) as VizEvent;
-        setLastEvent(e);
-        const node = COMPONENT_TO_NODE[e.component] ?? "backend";
-        setActivity((prev) => ({ ...prev, [node]: clamp01((prev[node] ?? 0) + 0.35) }));
-        // Make the “flow” happen: pulse a couple of edges per event.
-        const pulses = pulseEdgeFromComponent(e.component);
-        if (pulses.length) {
-          setEdgeActivity((prev) => {
-            const next: Record<string, number> = { ...prev };
-            for (const [a, b] of pulses) {
-              const id = edgeId(a, b);
-              next[id] = clamp01((next[id] ?? 0) + 0.6);
-              // also “energize” endpoints a bit
-              setActivity((p) => ({
-                ...p,
-                [a]: clamp01((p[a] ?? 0) + 0.12),
-                [b]: clamp01((p[b] ?? 0) + 0.18)
-              }));
-            }
-            return next;
-          });
+    // Make the “flow” happen: pulse a couple of edges per event.
+    const pulses = pulseEdgeFromComponent(e.component);
+    if (pulses.length) {
+      setEdgeActivity((prev) => {
+        const next: Record<string, number> = { ...prev };
+        for (const [a, b] of pulses) {
+          const id = edgeId(a, b);
+          next[id] = clamp01((next[id] ?? 0) + 0.6);
         }
-      } catch {
-        // ignore malformed events
+        return next;
+      });
+      // also “energize” endpoints a bit
+      for (const [a, b] of pulses) {
+        setActivity((p) => ({
+          ...p,
+          [a]: clamp01((p[a] ?? 0) + 0.12),
+          [b]: clamp01((p[b] ?? 0) + 0.18)
+        }));
       }
-    });
+    }
+  }, [events]);
 
-    es.addEventListener("ping", () => {
-      // subtle heartbeat even when idle
-      setEdgeActivity((prev) => ({ ...prev, [edgeId("frontend", "backend")]: clamp01((prev[edgeId("frontend", "backend")] ?? 0) + 0.12) }));
-    });
-
-    return () => es.close();
-  }, [props.backendBaseUrl, props.cluster, props.owner]);
+  useEffect(() => {
+    // subtle heartbeat even when idle (keeps the diagram feeling alive)
+    const t = setInterval(() => {
+      setEdgeActivity((prev) => ({
+        ...prev,
+        [edgeId("frontend", "backend")]: clamp01((prev[edgeId("frontend", "backend")] ?? 0) + 0.08)
+      }));
+    }, 2500);
+    return () => clearInterval(t);
+  }, []);
 
   const nodeTypes = useMemo(() => ({ glow: GlowNode }), []);
   const h = props.height ?? 420;

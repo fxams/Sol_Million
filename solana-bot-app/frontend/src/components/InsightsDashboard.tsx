@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import { useVizStream, type VizEvent, type VizComponent } from "./useVizStream";
+import type { VizEvent, VizComponent } from "./useVizStream";
 
 type Cluster = "mainnet-beta" | "devnet";
 
@@ -217,21 +217,21 @@ function ClusterRiskMiniMap(props: { hot: Record<string, number> }) {
 }
 
 export function InsightsDashboard(props: {
-  backendBaseUrl: string;
   cluster: Cluster;
-  owner?: string | null;
+  stream: {
+    connected: boolean;
+    lastEvent: VizEvent | null;
+    events: VizEvent[];
+  };
   buyAmountSol: number;
   mevEnabled: boolean;
   running: boolean;
   pendingAction: boolean;
   sessionsCount: number;
 }) {
-  const { connected, events, lastEvent } = useVizStream({
-    backendBaseUrl: props.backendBaseUrl,
-    cluster: props.cluster,
-    owner: props.owner ?? null,
-    maxEvents: 650
-  });
+  const connected = props.stream.connected;
+  const events = props.stream.events;
+  const lastEvent = props.stream.lastEvent;
 
   const [eventSeries, setEventSeries] = useState<SeriesPoint[]>([]);
   const [errorSeries, setErrorSeries] = useState<SeriesPoint[]>([]);

@@ -21,6 +21,8 @@ import {
   getAssociatedTokenAddressSync
 } from "@solana/spl-token";
 import { AppFlowViz } from "./AppFlowViz";
+import { InsightsDashboard } from "./InsightsDashboard";
+import { useVizStream } from "./useVizStream";
 
 type BotMode = "snipe" | "volume";
 type PumpFunPhase = "pre" | "post";
@@ -256,7 +258,7 @@ export function Dashboard() {
   const { connection } = useConnection();
   const wallet = useWallet();
 
-  const [activeTab, setActiveTab] = useState<"bot" | "fleet">("bot");
+  const [activeTab, setActiveTab] = useState<"bot" | "insights" | "fleet">("bot");
 
   const [cluster, setCluster] = useState<"mainnet-beta" | "devnet">(
     ((process.env.NEXT_PUBLIC_CLUSTER ?? "mainnet-beta") as "mainnet-beta" | "devnet") ||
@@ -317,6 +319,13 @@ export function Dashboard() {
   }, [fleetItems, fleetMetrics, fleetWallets.length]);
 
   const backendBaseUrl = useMemo(() => getBackendBaseUrl(), []);
+  const ownerB58 = wallet.publicKey ? wallet.publicKey.toBase58() : null;
+  const vizStream = useVizStream({
+    backendBaseUrl,
+    cluster,
+    owner: ownerB58,
+    maxEvents: 650
+  });
 
   const displayLogs = useMemo(() => {
     const merged = [...(clusterLogs ?? []), ...(sessionLogs ?? [])];
@@ -999,6 +1008,19 @@ export function Dashboard() {
             </button>
             <button
               type="button"
+              onClick={() => setActiveTab("insights")}
+              className={clsx(
+                "mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm",
+                activeTab === "insights" ? "bg-slate-900 text-slate-100" : "text-slate-300 hover:bg-slate-900/60"
+              )}
+            >
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-800 bg-slate-950 text-xs">
+                I
+              </span>
+              Insights
+            </button>
+            <button
+              type="button"
               onClick={() => setActiveTab("fleet")}
               className={clsx(
                 "mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm",
@@ -1027,18 +1049,27 @@ export function Dashboard() {
                 <div className="flex items-center justify-between gap-3">
                   <div>
                     <div className="text-sm font-semibold text-slate-100">
-                      {activeTab === "bot" ? "Bot workspace" : "Wallet fleet workspace"}
+                      {activeTab === "fleet"
+                        ? "Wallet fleet workspace"
+                        : activeTab === "insights"
+                          ? "Insights workspace"
+                          : "Bot workspace"}
                     </div>
                     <div className="text-xs text-slate-400">
-                      {activeTab === "bot"
-                        ? "Configure, monitor, and execute trades"
-                        : "Manage wallets, funding, and metrics"}
+                      {activeTab === "fleet"
+                        ? "Manage wallets, funding, and metrics"
+                        : activeTab === "insights"
+                          ? "High-signal real-time dashboard (heat, risk, activity)"
+                          : "Configure, monitor, and execute trades"}
                     </div>
                   </div>
                   {/* Mobile nav */}
                   <div className="inline-flex rounded-lg border border-slate-800 bg-slate-900/50 p-1 lg:hidden">
                     <TabButton active={activeTab === "bot"} onClick={() => setActiveTab("bot")}>
                       Bot
+                    </TabButton>
+                    <TabButton active={activeTab === "insights"} onClick={() => setActiveTab("insights")}>
+                      Insights
                     </TabButton>
                     <TabButton active={activeTab === "fleet"} onClick={() => setActiveTab("fleet")}>
                       Fleet
@@ -1066,7 +1097,15 @@ export function Dashboard() {
           <div className="mx-auto w-full max-w-7xl px-3 py-5 sm:px-4 sm:py-8">
             {/* KPI strip */}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 lg:grid-cols-5">
-              {activeTab === "bot" ? (
+              {activeTab === "fleet" ? (
+                <>
+                  <KpiCard label="Wallets" value={fleetTotals.totalWallets} />
+                  <KpiCard label="Running" value={fleetTotals.runningCount} />
+                  <KpiCard label="Pending" value={fleetTotals.pendingCount} />
+                  <KpiCard label="Total SOL" value={fleetTotals.totalSol.toFixed(3)} />
+                  <KpiCard label="Tx (24h)" value={fleetTotals.totalTx24h} />
+                </>
+              ) : (
                 <>
                   <KpiCard label="Status" value={running ? "Running" : "Stopped"} />
                   <KpiCard label="Mode" value={mode} />
@@ -1078,27 +1117,28 @@ export function Dashboard() {
                   />
                   <KpiCard label="Sessions" value={(sessions ?? []).length} />
                 </>
-              ) : (
-                <>
-                  <KpiCard label="Wallets" value={fleetTotals.totalWallets} />
-                  <KpiCard label="Running" value={fleetTotals.runningCount} />
-                  <KpiCard label="Pending" value={fleetTotals.pendingCount} />
-                  <KpiCard label="Total SOL" value={fleetTotals.totalSol.toFixed(3)} />
-                  <KpiCard label="Tx (24h)" value={fleetTotals.totalTx24h} />
-                </>
               )}
             </div>
 
-            <div className="mt-4">
-              <AppFlowViz
-                backendBaseUrl={backendBaseUrl}
-                cluster={cluster}
-                owner={wallet.publicKey ? wallet.publicKey.toBase58() : null}
-                height={420}
-              />
-            </div>
+            {activeTab === "bot" ? (
+              <div className="mt-4">
+                <AppFlowViz cluster={cluster} owner={ownerB58} stream={vizStream} height={420} />
+              </div>
+            ) : null}
 
-        {activeTab === "bot" ? (
+        {activeTab === "insights" ? (
+          <div className="mt-4">
+            <InsightsDashboard
+              cluster={cluster}
+              stream={vizStream}
+              buyAmountSol={Number(buyAmountSol) || 0}
+              mevEnabled={mevEnabled}
+              running={running}
+              pendingAction={Boolean(pendingAction)}
+              sessionsCount={(sessions ?? []).length}
+            />
+          </div>
+        ) : activeTab === "bot" ? (
         <>
         <div className="mt-4 grid grid-cols-1 gap-4 sm:gap-6 lg:grid-cols-2">
           <CollapsibleCard
