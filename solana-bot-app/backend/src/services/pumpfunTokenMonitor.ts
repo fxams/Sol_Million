@@ -551,7 +551,7 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
           
           recentTokens.set(cluster, cleaned);
 
-          // Notify listeners immediately with basic info
+          // Notify listeners immediately with basic info (don't wait for metadata)
           for (const listener of listeners) {
             try {
               listener(tokenInfo);
@@ -561,8 +561,8 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
           }
 
           // Fetch metadata asynchronously and update (metadata might not be immediately available)
-          // Use a single timeout to avoid memory leaks
-          const timeoutId = setTimeout(async () => {
+          // Reduced delay for faster updates
+          setTimeout(async () => {
             try {
               // Try Pump Fun API first
               const pumpFunMetadata = await fetchPumpFunMetadata(tokenInfo.mint);
@@ -594,10 +594,7 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
             } catch {
               // ignore async metadata update errors
             }
-          }, 3000); // Wait 3 seconds for metadata to be available on Pump Fun API
-          
-          // Store timeout ID for potential cleanup (though in practice these should complete quickly)
-          // Note: In a production environment, you'd want to track these and clear them on shutdown
+          }, 1000); // Reduced to 1 second for faster metadata updates
 
           pushClusterLog(
             cluster,

@@ -1,7 +1,8 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useCallback } from "react";
 import clsx from "clsx";
+import toast from "react-hot-toast";
 import { usePumpFunTokenStream } from "./usePumpFunTokenStream";
 
 type Cluster = "mainnet-beta" | "devnet";
@@ -73,16 +74,38 @@ function TokenCard({ token, cluster, isNew }: { token: any; cluster: Cluster; is
     imageUrl = `https://api.dicebear.com/7.x/shapes/svg?seed=${token.mint}`;
   }
 
+  const copyAddress = useCallback(async () => {
+    try {
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(token.mint);
+        toast.success("Address copied!");
+      } else {
+        const ta = document.createElement("textarea");
+        ta.value = token.mint;
+        ta.style.position = "fixed";
+        ta.style.left = "-9999px";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        toast.success("Address copied!");
+      }
+    } catch (e: any) {
+      toast.error("Failed to copy");
+    }
+  }, [token.mint]);
+
   return (
     <div
       className={clsx(
-        "group relative overflow-hidden rounded-xl border transition-all",
+        "group relative overflow-hidden rounded-lg border transition-all",
         isNew
-          ? "border-emerald-500/30 bg-emerald-500/5 shadow-lg shadow-emerald-500/10"
+          ? "border-emerald-500/30 bg-emerald-500/5 shadow-md shadow-emerald-500/10"
           : "border-slate-800 bg-slate-900/40 hover:border-slate-700 hover:bg-slate-900/60"
       )}
     >
-      {/* Image */}
+      {/* Image - smaller */}
       <div className="relative aspect-square w-full overflow-hidden bg-slate-950">
         <img
           src={imageUrl}
@@ -97,41 +120,59 @@ function TokenCard({ token, cluster, isNew }: { token: any; cluster: Cluster; is
           }}
         />
         {isNew && (
-          <div className="absolute bottom-2 left-2 rounded-full bg-emerald-500 px-2 py-0.5 text-[10px] font-semibold text-white">
+          <div className="absolute bottom-1 left-1 rounded-full bg-emerald-500 px-1.5 py-0.5 text-[9px] font-semibold text-white">
             LIVE
           </div>
         )}
       </div>
 
-      {/* Content */}
-      <div className="p-3">
-        <div className="mb-1">
-          <h3 className="text-sm font-semibold text-slate-100 line-clamp-1">{displayName}</h3>
-          <p className="text-xs text-slate-400">{displaySymbol}</p>
+      {/* Content - smaller padding */}
+      <div className="p-2">
+        <div className="mb-1 flex items-start justify-between gap-1">
+          <div className="min-w-0 flex-1">
+            <h3 className="text-xs font-semibold text-slate-100 line-clamp-1">{displayName}</h3>
+            <div className="mt-0.5 flex items-center gap-1.5">
+              <p className="text-[10px] text-slate-400">{displaySymbol}</p>
+              <button
+                onClick={copyAddress}
+                className="shrink-0 text-slate-500 hover:text-slate-300 transition"
+                title="Copy contract address"
+              >
+                <svg className="h-3 w-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"
+                  />
+                </svg>
+              </button>
+            </div>
+          </div>
         </div>
 
-        <div className="mb-2 flex items-center justify-between text-xs text-slate-500">
+        <div className="mb-1.5 flex items-center justify-between text-[10px] text-slate-500">
           <span>{formatTimeAgo(token.timestamp)}</span>
-          <span className="font-mono">by {formatAddress(token.deployer, 4)}</span>
+          <span className="font-mono">by {formatAddress(token.deployer, 3)}</span>
         </div>
 
-        <div className="mb-2">
-          <div className="text-xs font-semibold text-slate-300">
+        <div className="mb-1.5">
+          <div className="text-[10px] font-semibold text-slate-300">
             MC: {formatMarketCap(token.supply, token.decimals)}
           </div>
         </div>
 
         {token.description && (
-          <p className="mb-2 line-clamp-2 text-xs text-slate-400">{token.description}</p>
+          <p className="mb-1.5 line-clamp-1 text-[10px] text-slate-400">{token.description}</p>
         )}
 
-        {/* Links */}
-        <div className="flex flex-wrap items-center gap-2">
+        {/* Links - smaller */}
+        <div className="flex flex-wrap items-center gap-1">
           <a
             href={pumpFunUrl(token.mint)}
             target="_blank"
             rel="noreferrer"
-            className="rounded-md bg-slate-800 px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-slate-700 transition"
+            className="rounded bg-slate-800 px-1.5 py-0.5 text-[9px] font-medium text-slate-200 hover:bg-slate-700 transition"
           >
             Pump.fun
           </a>
@@ -139,7 +180,7 @@ function TokenCard({ token, cluster, isNew }: { token: any; cluster: Cluster; is
             href={explorerMintUrl(token.mint, cluster)}
             target="_blank"
             rel="noreferrer"
-            className="rounded-md bg-slate-800 px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-slate-700 transition"
+            className="rounded bg-slate-800 px-1.5 py-0.5 text-[9px] font-medium text-slate-200 hover:bg-slate-700 transition"
           >
             Explorer
           </a>
@@ -148,7 +189,7 @@ function TokenCard({ token, cluster, isNew }: { token: any; cluster: Cluster; is
               href={token.website.startsWith("http") ? token.website : `https://${token.website}`}
               target="_blank"
               rel="noreferrer"
-              className="rounded-md bg-slate-800 px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-slate-700 transition"
+              className="rounded bg-slate-800 px-1.5 py-0.5 text-[9px] font-medium text-slate-200 hover:bg-slate-700 transition"
             >
               Website
             </a>
@@ -164,7 +205,7 @@ function TokenCard({ token, cluster, isNew }: { token: any; cluster: Cluster; is
               }
               target="_blank"
               rel="noreferrer"
-              className="rounded-md bg-slate-800 px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-slate-700 transition"
+              className="rounded bg-slate-800 px-1.5 py-0.5 text-[9px] font-medium text-slate-200 hover:bg-slate-700 transition"
             >
               Twitter
             </a>
@@ -281,9 +322,9 @@ export function PumpFunTokenMonitor(props: { backendBaseUrl: string; cluster: Cl
         />
       </div>
 
-      {/* Token Cards Grid */}
+      {/* Token Cards Grid - more columns for smaller cards */}
       {filteredTokens.length === 0 ? (
-        <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-12 text-center text-sm text-slate-500">
+        <div className="rounded-lg border border-slate-800 bg-slate-950/40 px-4 py-8 text-center text-xs text-slate-500">
           {tokens.length === 0
             ? connected
               ? "Waiting for new token deployments..."
@@ -291,7 +332,7 @@ export function PumpFunTokenMonitor(props: { backendBaseUrl: string; cluster: Cl
             : "No tokens match your filters."}
         </div>
       ) : (
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 2xl:grid-cols-7">
           {filteredTokens.map((token, idx) => {
             const isNew = idx === 0 && filter === "recent" && Date.now() - token.timestamp < 60_000;
             return <TokenCard key={`${token.signature}-${idx}`} token={token} cluster={props.cluster} isNew={isNew} />;

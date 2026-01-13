@@ -42,8 +42,15 @@ export function usePumpFunTokenStream(opts: {
     const es = new EventSource(url);
     esRef.current = es;
 
-    es.addEventListener("open", () => setConnected(true));
-    es.addEventListener("error", () => setConnected(false));
+    es.addEventListener("open", () => {
+      setConnected(true);
+    });
+    
+    es.addEventListener("error", (e) => {
+      setConnected(false);
+      // Log error for debugging
+      console.warn("Token stream error:", e);
+    });
 
     es.addEventListener("message", (ev) => {
       try {

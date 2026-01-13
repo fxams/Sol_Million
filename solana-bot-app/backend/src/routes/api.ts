@@ -531,19 +531,33 @@ router.get("/pumpfun-tokens/stream", (req, res) => {
   res.setHeader("X-Accel-Buffering", "no");
 
   const write = (eventName: string | null, data: unknown) => {
-    if (eventName) res.write(`event: ${eventName}\n`);
-    res.write(`data: ${JSON.stringify(data)}\n\n`);
+    try {
+      if (eventName) res.write(`event: ${eventName}\n`);
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    } catch {
+      // Connection closed, ignore
+    }
   };
 
   write("hello", { ts: Date.now(), cluster });
 
-  // Start monitoring if not already started
+  // Start monitoring if not already started (non-blocking)
   ensureTokenMonitoring(cluster).catch(() => {});
 
-  // Send recent tokens backlog
+  // Send recent tokens backlog (reduced to avoid delay, send in batch)
   const recent = getRecentTokens(cluster);
-  for (const token of recent.slice(0, 50)) {
+  const toSend = recent.slice(0, 10); // Further reduced for faster initial load
+  for (const token of toSend) {
     write(null, token);
+  }
+  
+  // Send remaining tokens after a short delay to avoid blocking
+  if (recent.length > 10) {
+    setTimeout(() => {
+      for (const token of recent.slice(10, 20)) {
+        write(null, token);
+      }
+    }, 100);
   }
 
   // Subscribe to new token deployments
