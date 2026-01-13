@@ -6,7 +6,7 @@ import { usePumpFunTokenStream } from "./usePumpFunTokenStream";
 
 type Cluster = "mainnet-beta" | "devnet";
 
-function formatAddress(addr: string | null, length = 8) {
+function formatAddress(addr: string | null, length = 6) {
   if (!addr) return "-";
   if (addr.length <= length * 2) return addr;
   return `${addr.slice(0, length)}...${addr.slice(-length)}`;
@@ -20,23 +20,29 @@ function formatTimeAgo(timestamp: number) {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours}h ago`;
   const days = Math.floor(hours / 24);
-  return `${days}d ago`;
+  if (days < 30) return `${days}d ago`;
+  const months = Math.floor(days / 30);
+  return `${months}mo ago`;
 }
 
-function formatSupply(supply: string | undefined, decimals: number | undefined) {
+function formatMarketCap(supply: string | undefined, decimals: number | undefined): string {
   if (!supply || !decimals) return "-";
   try {
     const num = BigInt(supply);
     const divisor = BigInt(10 ** (decimals || 0));
     const whole = num / divisor;
-    const remainder = num % divisor;
-    if (remainder === 0n) {
-      return whole.toString();
+    const formatted = whole.toLocaleString();
+    if (formatted.length > 6) {
+      const millions = Number(whole) / 1_000_000;
+      return `$${millions.toFixed(1)}M`;
     }
-    const decimalsStr = remainder.toString().padStart(decimals, "0").replace(/0+$/, "");
-    return decimalsStr ? `${whole}.${decimalsStr}` : whole.toString();
+    if (formatted.length > 3) {
+      const thousands = Number(whole) / 1_000;
+      return `$${thousands.toFixed(1)}K`;
+    }
+    return `$${formatted}`;
   } catch {
-    return supply;
+    return "-";
   }
 }
 
@@ -48,6 +54,114 @@ function explorerMintUrl(mint: string, cluster: string) {
 function explorerTxUrl(signature: string, cluster: string) {
   const c = cluster === "devnet" ? "?cluster=devnet" : "";
   return `https://explorer.solana.com/tx/${signature}${c}`;
+}
+
+function pumpFunUrl(mint: string) {
+  return `https://pump.fun/${mint}`;
+}
+
+function TokenCard({ token, cluster, isNew }: { token: any; cluster: Cluster; isNew: boolean }) {
+  const displayName = token.name || formatAddress(token.mint, 4);
+  const displaySymbol = token.symbol || "N/A";
+  const imageUrl = token.imageUri || `https://api.dicebear.com/7.x/shapes/svg?seed=${token.mint}`;
+
+  return (
+    <div
+      className={clsx(
+        "group relative overflow-hidden rounded-xl border transition-all",
+        isNew
+          ? "border-emerald-500/30 bg-emerald-500/5 shadow-lg shadow-emerald-500/10"
+          : "border-slate-800 bg-slate-900/40 hover:border-slate-700 hover:bg-slate-900/60"
+      )}
+    >
+      {/* Image */}
+      <div className="relative aspect-square w-full overflow-hidden bg-slate-950">
+        <img
+          src={imageUrl}
+          alt={displayName}
+          className="h-full w-full object-cover"
+          onError={(e) => {
+            const target = e.target as HTMLImageElement;
+            target.src = `https://api.dicebear.com/7.x/shapes/svg?seed=${token.mint}`;
+          }}
+        />
+        {isNew && (
+          <div className="absolute bottom-2 left-2 rounded-full bg-emerald-500 px-2 py-0.5 text-[10px] font-semibold text-white">
+            LIVE
+          </div>
+        )}
+      </div>
+
+      {/* Content */}
+      <div className="p-3">
+        <div className="mb-1">
+          <h3 className="text-sm font-semibold text-slate-100 line-clamp-1">{displayName}</h3>
+          <p className="text-xs text-slate-400">{displaySymbol}</p>
+        </div>
+
+        <div className="mb-2 flex items-center justify-between text-xs text-slate-500">
+          <span>{formatTimeAgo(token.timestamp)}</span>
+          <span className="font-mono">by {formatAddress(token.deployer, 4)}</span>
+        </div>
+
+        <div className="mb-2">
+          <div className="text-xs font-semibold text-slate-300">
+            MC: {formatMarketCap(token.supply, token.decimals)}
+          </div>
+        </div>
+
+        {token.description && (
+          <p className="mb-2 line-clamp-2 text-xs text-slate-400">{token.description}</p>
+        )}
+
+        {/* Links */}
+        <div className="flex flex-wrap items-center gap-2">
+          <a
+            href={pumpFunUrl(token.mint)}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-md bg-slate-800 px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-slate-700 transition"
+          >
+            Pump.fun
+          </a>
+          <a
+            href={explorerMintUrl(token.mint, cluster)}
+            target="_blank"
+            rel="noreferrer"
+            className="rounded-md bg-slate-800 px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-slate-700 transition"
+          >
+            Explorer
+          </a>
+          {token.website && (
+            <a
+              href={token.website.startsWith("http") ? token.website : `https://${token.website}`}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-md bg-slate-800 px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-slate-700 transition"
+            >
+              Website
+            </a>
+          )}
+          {token.twitter && (
+            <a
+              href={
+                token.twitter.startsWith("http")
+                  ? token.twitter
+                  : token.twitter.startsWith("@")
+                    ? `https://twitter.com/${token.twitter.slice(1)}`
+                    : `https://twitter.com/${token.twitter}`
+              }
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-md bg-slate-800 px-2 py-1 text-[10px] font-medium text-slate-200 hover:bg-slate-700 transition"
+            >
+              Twitter
+            </a>
+          )}
+        </div>
+      </div>
+    </div>
+  );
 }
 
 export function PumpFunTokenMonitor(props: { backendBaseUrl: string; cluster: Cluster }) {
@@ -62,7 +176,7 @@ export function PumpFunTokenMonitor(props: { backendBaseUrl: string; cluster: Cl
 
   const filteredTokens = useMemo(() => {
     let filtered = tokens;
-    
+
     // Filter by time
     if (filter === "recent") {
       const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
@@ -75,6 +189,8 @@ export function PumpFunTokenMonitor(props: { backendBaseUrl: string; cluster: Cl
       filtered = filtered.filter(
         (t) =>
           t.mint.toLowerCase().includes(query) ||
+          t.name?.toLowerCase().includes(query) ||
+          t.symbol?.toLowerCase().includes(query) ||
           t.deployer?.toLowerCase().includes(query) ||
           t.signature.toLowerCase().includes(query)
       );
@@ -147,83 +263,30 @@ export function PumpFunTokenMonitor(props: { backendBaseUrl: string; cluster: Cl
         </div>
         <input
           type="text"
-          placeholder="Search by mint, deployer, or signature..."
+          placeholder="Search by name, symbol, mint, or deployer..."
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
           className="flex-1 min-w-[200px] rounded-md border border-slate-800 bg-slate-950 px-3 py-2 text-sm text-slate-200 placeholder:text-slate-500"
         />
       </div>
 
-      {/* Token List */}
-      <div className="rounded-xl border border-slate-800 bg-slate-950/40">
-        <div className="max-h-[600px] overflow-auto">
-          {filteredTokens.length === 0 ? (
-            <div className="px-4 py-8 text-center text-sm text-slate-500">
-              {tokens.length === 0
-                ? connected
-                  ? "Waiting for new token deployments..."
-                  : "Connecting to token stream..."
-                : "No tokens match your filters."}
-            </div>
-          ) : (
-            <table className="w-full text-left text-sm">
-              <thead className="sticky top-0 z-10 border-b border-slate-800 bg-slate-950">
-                <tr>
-                  <th className="px-4 py-3 text-xs font-semibold text-slate-300">Time</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-slate-300">Mint</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-slate-300">Deployer</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-slate-300">Supply</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-slate-300">Decimals</th>
-                  <th className="px-4 py-3 text-xs font-semibold text-slate-300">Links</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredTokens.map((token, idx) => (
-                  <tr
-                    key={`${token.signature}-${idx}`}
-                    className={clsx(
-                      "border-b border-slate-900 transition-colors",
-                      idx === 0 && filter === "recent" ? "bg-emerald-500/5" : "hover:bg-slate-900/40"
-                    )}
-                  >
-                    <td className="px-4 py-3 text-xs text-slate-400">{formatTimeAgo(token.timestamp)}</td>
-                    <td className="px-4 py-3">
-                      <div className="font-mono text-xs text-slate-200">{formatAddress(token.mint, 6)}</div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <div className="font-mono text-xs text-slate-300">{formatAddress(token.deployer, 6)}</div>
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-300">
-                      {formatSupply(token.supply, token.decimals)}
-                    </td>
-                    <td className="px-4 py-3 text-xs text-slate-400">{token.decimals ?? "-"}</td>
-                    <td className="px-4 py-3">
-                      <div className="flex gap-2">
-                        <a
-                          href={explorerMintUrl(token.mint, props.cluster)}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-sky-300 hover:text-sky-200 hover:underline text-xs"
-                        >
-                          Mint
-                        </a>
-                        <a
-                          href={explorerTxUrl(token.signature, props.cluster)}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-sky-300 hover:text-sky-200 hover:underline text-xs"
-                        >
-                          Tx
-                        </a>
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+      {/* Token Cards Grid */}
+      {filteredTokens.length === 0 ? (
+        <div className="rounded-xl border border-slate-800 bg-slate-950/40 px-4 py-12 text-center text-sm text-slate-500">
+          {tokens.length === 0
+            ? connected
+              ? "Waiting for new token deployments..."
+              : "Connecting to token stream..."
+            : "No tokens match your filters."}
         </div>
-      </div>
+      ) : (
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          {filteredTokens.map((token, idx) => {
+            const isNew = idx === 0 && filter === "recent" && Date.now() - token.timestamp < 60_000;
+            return <TokenCard key={`${token.signature}-${idx}`} token={token} cluster={props.cluster} isNew={isNew} />;
+          })}
+        </div>
+      )}
 
       {filteredTokens.length > 0 && (
         <div className="text-xs text-slate-400">

@@ -16,6 +16,10 @@ export type PumpFunTokenInfo = {
   decimals?: number;
   supply?: string;
   metadataUri?: string;
+  imageUri?: string;
+  website?: string;
+  twitter?: string;
+  description?: string;
 };
 
 type TokenDeploymentListener = (token: PumpFunTokenInfo) => void;
@@ -76,7 +80,54 @@ async function getTransactionFast(connection: Connection, cluster: Cluster, sign
 }
 
 function isCreateLikePumpfunLogs(logs: string[]) {
-  return logs.some((l) => /instruction:\s*create/i.test(l) || /\bcreate\b/i.test(l));
+  // More specific: look for actual create instruction, not just any "create" word
+  return logs.some((l) => 
+    /instruction:\s*create/i.test(l) || 
+    /program log:\s*create/i.test(l) ||
+    /create.*token/i.test(l) ||
+    /initialize.*token/i.test(l)
+  );
+}
+
+// Check if transaction actually creates a new mint (not just a trade)
+function isTokenCreationTx(tx: any, mint: string): boolean {
+  // Must have the mint appear in post but not pre token balances
+  const preMints = new Set<string>();
+  const postMints = new Set<string>();
+  
+  for (const b of tx?.meta?.preTokenBalances ?? []) {
+    if (b?.mint) preMints.add(b.mint);
+  }
+  for (const b of tx?.meta?.postTokenBalances ?? []) {
+    if (b?.mint) postMints.add(b.mint);
+  }
+  
+  // Mint must be new (in post but not pre)
+  if (!postMints.has(mint) || preMints.has(mint)) return false;
+  
+  // Additional check: look for mint initialization in inner instructions
+  const innerInstructions = tx?.meta?.innerInstructions ?? [];
+  for (const inner of innerInstructions) {
+    for (const ix of inner?.instructions ?? []) {
+      const programIdIndex = ix?.programIdIndex;
+      if (programIdIndex !== undefined) {
+        try {
+          const keys = getStaticAccountKeysFromTx(tx);
+          if (keys.length > programIdIndex) {
+            const programId = keys[programIdIndex];
+            if (programId && (programId.equals(TOKEN_PROGRAM_ID) || programId.equals(TOKEN_2022_PROGRAM_ID))) {
+              // This is likely a token operation
+              return true;
+            }
+          }
+        } catch {
+          // ignore parsing errors
+        }
+      }
+    }
+  }
+  
+  return true; // If mint is new, assume it's a creation
 }
 
 function isMintNewInTx(tx: any, mint: string) {
@@ -121,9 +172,14 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
   if (mints.size === 0) return null;
 
   const mint = Array.from(mints)[0];
-  const isCreate = isCreateLikePumpfunLogs(opts.logs) || isMintNewInTx(tx, mint);
-
-  if (!isCreate) return null;
+  
+  // More strict: must be a new mint AND look like a creation
+  const isNewMint = isMintNewInTx(tx, mint);
+  const hasCreateLogs = isCreateLikePumpfunLogs(opts.logs);
+  const isCreationTx = isTokenCreationTx(tx, mint);
+  
+  // Require both: new mint AND (create logs OR creation transaction pattern)
+  if (!isNewMint || (!hasCreateLogs && !isCreationTx)) return null;
 
   // Extract deployer (first signer)
   const keys = getStaticAccountKeysFromTx(tx);
@@ -132,6 +188,14 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
   // Get token metadata
   let decimals: number | undefined;
   let supply: string | undefined;
+  let name: string | undefined;
+  let symbol: string | undefined;
+  let imageUri: string | undefined;
+  let website: string | undefined;
+  let twitter: string | undefined;
+  let description: string | undefined;
+  let metadataUri: string | undefined;
+
   try {
     const mintPk = new PublicKey(mint);
     const info = await withRetries(async () => await connection.getAccountInfo(mintPk, "confirmed"), {
@@ -156,6 +220,33 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
     } catch {
       // ignore
     }
+
+    // Fetch Metaplex metadata
+    try {
+      const metadata = await fetchMetaplexMetadata(connection, mintPk);
+      if (metadata) {
+        name = metadata.name;
+        symbol = metadata.symbol;
+        imageUri = metadata.image;
+        metadataUri = metadata.uri;
+        description = metadata.description;
+        if (metadata.external_url) website = metadata.external_url;
+        if (metadata.twitter) twitter = metadata.twitter;
+        if (metadata.attributes) {
+          // Some tokens store links in attributes
+          for (const attr of metadata.attributes) {
+            if (attr.trait_type === "website" && typeof attr.value === "string") {
+              website = attr.value;
+            }
+            if (attr.trait_type === "twitter" && typeof attr.value === "string") {
+              twitter = attr.value;
+            }
+          }
+        }
+      }
+    } catch {
+      // ignore metadata fetch errors
+    }
   } catch {
     // ignore metadata errors
   }
@@ -166,11 +257,102 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
     deployer,
     timestamp: Date.now(),
     decimals,
-    supply
+    supply,
+    name,
+    symbol,
+    imageUri,
+    website,
+    twitter,
+    description,
+    metadataUri
   };
 }
 
+// Derive Metaplex metadata PDA
+async function deriveMetadataPDA(mint: PublicKey): Promise<PublicKey> {
+  const METADATA_PROGRAM_ID = new PublicKey("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s");
+  const [metadataPDA] = PublicKey.findProgramAddressSync(
+    [Buffer.from("metadata"), METADATA_PROGRAM_ID.toBuffer(), mint.toBuffer()],
+    METADATA_PROGRAM_ID
+  );
+  return metadataPDA;
+}
+
+// Fetch Metaplex metadata
+async function fetchMetaplexMetadata(connection: Connection, mint: PublicKey): Promise<any | null> {
+  try {
+    const metadataPDA = await deriveMetadataPDA(mint);
+    const metadataAccount = await withRetries(
+      async () => await connection.getAccountInfo(metadataPDA, "confirmed"),
+      { attempts: 2, baseDelayMs: 200 }
+    );
+
+    if (!metadataAccount || !metadataAccount.data) return null;
+
+    // Parse Metaplex metadata (simplified - real parsing is more complex)
+    const data = metadataAccount.data;
+    if (data.length < 1) return null;
+
+    // Skip key (1 byte) and update authority (32 bytes)
+    let offset = 1 + 32;
+    if (data.length < offset + 32) return null;
+
+    // Mint (32 bytes)
+    offset += 32;
+
+    // Data struct starts here
+    if (data.length < offset + 4) return null;
+    const nameLen = data.readUInt32LE(offset);
+    offset += 4;
+    if (data.length < offset + nameLen) return null;
+    const nameBytes = data.slice(offset, offset + nameLen);
+    const name = nameBytes.toString("utf8").replace(/\0/g, "");
+    offset += nameLen;
+
+    if (data.length < offset + 4) return null;
+    const symbolLen = data.readUInt32LE(offset);
+    offset += 4;
+    if (data.length < offset + symbolLen) return null;
+    const symbolBytes = data.slice(offset, offset + symbolLen);
+    const symbol = symbolBytes.toString("utf8").replace(/\0/g, "");
+    offset += symbolLen;
+
+    if (data.length < offset + 4) return null;
+    const uriLen = data.readUInt32LE(offset);
+    offset += 4;
+    if (data.length < offset + uriLen) return null;
+    const uriBytes = data.slice(offset, offset + uriLen);
+    const uri = uriBytes.toString("utf8").replace(/\0/g, "");
+
+    // Fetch JSON metadata from URI
+    if (uri && uri.startsWith("http")) {
+      try {
+        const response = await fetch(uri, { signal: AbortSignal.timeout(5000) });
+        if (response.ok) {
+          const json = await response.json();
+          return {
+            name: json.name || name,
+            symbol: json.symbol || symbol,
+            image: json.image,
+            description: json.description,
+            external_url: json.external_url,
+            twitter: json.twitter || json.twitter_url,
+            uri
+          };
+        }
+      } catch {
+        // ignore fetch errors
+      }
+    }
+
+    return { name, symbol, uri };
+  } catch {
+    return null;
+  }
+}
+
 const seenSignatures = new Map<Cluster, Set<string>>();
+const seenMints = new Map<Cluster, Set<string>>();
 const wsConnections = new Map<Cluster, WebSocket>();
 
 function markSeenSignature(cluster: Cluster, signature: string): boolean {
@@ -184,6 +366,21 @@ function markSeenSignature(cluster: Cluster, signature: string): boolean {
   if (seen.size > 5000) {
     const keep = Array.from(seen).slice(-3000);
     seenSignatures.set(cluster, new Set(keep));
+  }
+  return false;
+}
+
+function markSeenMint(cluster: Cluster, mint: string): boolean {
+  if (!seenMints.has(cluster)) {
+    seenMints.set(cluster, new Set());
+  }
+  const seen = seenMints.get(cluster)!;
+  if (seen.has(mint)) return true;
+  seen.add(mint);
+  // Cap memory
+  if (seen.size > 10000) {
+    const keep = Array.from(seen).slice(-7000);
+    seenMints.set(cluster, new Set(keep));
   }
   return false;
 }
@@ -242,6 +439,12 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
         try {
           const tokenInfo = await extractTokenInfo({ cluster, signature, logs });
           if (!tokenInfo) return;
+          
+          // Skip if we've already seen this mint (avoid duplicates)
+          if (markSeenMint(cluster, tokenInfo.mint)) {
+            pushClusterLog(cluster, "info", `Skipping duplicate mint: ${tokenInfo.mint.slice(0, 8)}...`);
+            return;
+          }
 
           // Add to recent tokens
           if (!recentTokens.has(cluster)) {

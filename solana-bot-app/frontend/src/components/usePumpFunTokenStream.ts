@@ -12,6 +12,10 @@ export type PumpFunTokenInfo = {
   decimals?: number;
   supply?: string;
   metadataUri?: string;
+  imageUri?: string;
+  website?: string;
+  twitter?: string;
+  description?: string;
 };
 
 export function usePumpFunTokenStream(opts: {
