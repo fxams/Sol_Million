@@ -220,7 +220,7 @@ export function PumpFunTokenMonitor(props: { backendBaseUrl: string; cluster: Cl
   const { connected, tokens } = usePumpFunTokenStream({
     backendBaseUrl: props.backendBaseUrl,
     cluster: props.cluster,
-    maxTokens: 200
+    maxTokens: 100 // Reduced from 200 to save memory
   });
 
   const [filter, setFilter] = useState<"all" | "recent">("recent");

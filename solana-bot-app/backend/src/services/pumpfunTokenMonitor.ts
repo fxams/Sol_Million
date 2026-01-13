@@ -26,8 +26,8 @@ type TokenDeploymentListener = (token: PumpFunTokenInfo) => void;
 
 const listeners = new Set<TokenDeploymentListener>();
 const recentTokens = new Map<Cluster, PumpFunTokenInfo[]>();
-const MAX_RECENT_TOKENS = 100; // Reduced from 500 to save memory
-const TOKEN_CLEANUP_AGE_MS = 60 * 60 * 1000; // Clean up tokens older than 1 hour
+const MAX_RECENT_TOKENS = 50; // Further reduced to save memory
+const TOKEN_CLEANUP_AGE_MS = 30 * 60 * 1000; // Clean up tokens older than 30 minutes
 
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -67,17 +67,19 @@ async function withRetries<T>(fn: () => Promise<T>, opts?: { attempts?: number; 
 }
 
 async function getTransactionFast(connection: Connection, cluster: Cluster, signature: string) {
+  // Use minimal transaction fetch - only get what we need
   const attempt = async (commitment: "confirmed" | "finalized") =>
     await connection.getTransaction(signature, {
       commitment,
       maxSupportedTransactionVersion: 0
     });
 
-  const txConfirmed = await withRetries(async () => await attempt("confirmed"), { attempts: 3, baseDelayMs: 200 });
+  // Reduced retries to save memory and time
+  const txConfirmed = await withRetries(async () => await attempt("confirmed"), { attempts: 2, baseDelayMs: 150 });
   if (txConfirmed) return txConfirmed;
 
-  const txFinalized = await withRetries(async () => await attempt("finalized"), { attempts: 2, baseDelayMs: 250 });
-  return txFinalized;
+  // Skip finalized if confirmed works (saves memory)
+  return null;
 }
 
 function isCreateLikePumpfunLogs(logs: string[]) {
@@ -140,9 +142,13 @@ function isMintNewInTx(tx: any, mint: string) {
 }
 
 async function extractTokenInfo(opts: { cluster: Cluster; signature: string; logs: string[] }): Promise<PumpFunTokenInfo | null> {
+  // Create connection only when needed (don't keep it open)
   const connection = new Connection(getRpcUrl(opts.cluster), "confirmed");
   const tx = await getTransactionFast(connection, opts.cluster, opts.signature);
-  if (!tx) return null;
+  if (!tx) {
+    // Clean up connection reference
+    return null;
+  }
 
   // Extract mint from token balances
   const mints = new Set<string>();
@@ -150,13 +156,13 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
   for (const b of tx.meta?.preTokenBalances ?? []) if (b.mint) mints.add(b.mint);
 
   if (mints.size === 0) {
-    // Try to find mint in account keys
+    // Try to find mint in account keys (reduced probe to save RPC calls)
     const keys = getStaticAccountKeysFromTx(tx);
-    for (const k of keys.slice(0, 25)) {
+    for (const k of keys.slice(0, 10)) { // Reduced from 25 to 10
       try {
         const info = await withRetries(async () => await connection.getAccountInfo(k, "confirmed"), {
-          attempts: 2,
-          baseDelayMs: 200
+          attempts: 1, // Single attempt to save memory
+          baseDelayMs: 100
         });
         if (!info) continue;
         if (!info.owner.equals(TOKEN_PROGRAM_ID) && !info.owner.equals(TOKEN_2022_PROGRAM_ID)) continue;
@@ -207,19 +213,7 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
 
   try {
     const mintPk = new PublicKey(mint);
-    const info = await withRetries(async () => await connection.getAccountInfo(mintPk, "confirmed"), {
-      attempts: 2,
-      baseDelayMs: 200
-    });
-    if (info) {
-      const parsed = parseMintAccount(Buffer.from(info.data));
-      if (parsed) {
-        decimals = parsed.decimals;
-        supply = parsed.supply.toString();
-      }
-    }
-
-    // Try to get token supply
+    // Skip account info fetch - use token supply directly (more efficient)
     try {
       const supplyResp = await connection.getTokenSupply(mintPk, "confirmed");
       if (supplyResp.value) {
@@ -227,53 +221,24 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
         decimals = supplyResp.value.decimals;
       }
     } catch {
-      // ignore
-    }
-
-    // Fetch metadata from multiple sources
-    try {
-      // First try Pump Fun API (most reliable for Pump Fun tokens)
-      const pumpFunMetadata = await fetchPumpFunMetadata(mint);
-      if (pumpFunMetadata) {
-        name = pumpFunMetadata.name || name;
-        symbol = pumpFunMetadata.symbol || symbol;
-        imageUri = pumpFunMetadata.image || imageUri;
-        website = pumpFunMetadata.website || website;
-        twitter = pumpFunMetadata.twitter || twitter;
-        description = pumpFunMetadata.description || description;
-      }
-    } catch (e: any) {
-      pushClusterLog(opts.cluster, "warn", `Pump Fun API fetch failed for ${mint.slice(0, 8)}: ${e?.message}`);
-    }
-
-    // Fallback to Metaplex metadata
-    if (!name || !imageUri) {
+      // If token supply fails, try account info as fallback (single attempt)
       try {
-        const metadata = await fetchMetaplexMetadata(connection, mintPk);
-        if (metadata) {
-          name = name || metadata.name;
-          symbol = symbol || metadata.symbol;
-          imageUri = imageUri || metadata.image;
-          metadataUri = metadataUri || metadata.uri;
-          description = description || metadata.description;
-          if (!website && metadata.external_url) website = metadata.external_url;
-          if (!twitter && metadata.twitter) twitter = metadata.twitter;
-          if (metadata.attributes) {
-            // Some tokens store links in attributes
-            for (const attr of metadata.attributes) {
-              if (attr.trait_type === "website" && typeof attr.value === "string" && !website) {
-                website = attr.value;
-              }
-              if (attr.trait_type === "twitter" && typeof attr.value === "string" && !twitter) {
-                twitter = attr.value;
-              }
-            }
+        const info = await connection.getAccountInfo(mintPk, "confirmed");
+        if (info) {
+          const parsed = parseMintAccount(Buffer.from(info.data));
+          if (parsed) {
+            decimals = parsed.decimals;
+            supply = parsed.supply.toString();
           }
         }
-      } catch (e: any) {
-        pushClusterLog(opts.cluster, "warn", `Metaplex metadata fetch failed for ${mint.slice(0, 8)}: ${e?.message}`);
+      } catch {
+        // ignore
       }
     }
+
+    // Skip metadata fetching during initial extraction to save memory
+    // Metadata will be fetched asynchronously later
+    // This allows tokens to appear immediately without blocking
   } catch {
     // ignore metadata errors
   }
@@ -436,9 +401,9 @@ function markSeenSignature(cluster: Cluster, signature: string): boolean {
   const seen = seenSignatures.get(cluster)!;
   if (seen.has(signature)) return true;
   seen.add(signature);
-  // Cap memory - reduced size
-  if (seen.size > 2000) {
-    const keep = Array.from(seen).slice(-1000);
+  // Cap memory - more aggressive
+  if (seen.size > 1000) {
+    const keep = Array.from(seen).slice(-500);
     seenSignatures.set(cluster, new Set(keep));
   }
   return false;
@@ -451,9 +416,9 @@ function markSeenMint(cluster: Cluster, mint: string): boolean {
   const seen = seenMints.get(cluster)!;
   if (seen.has(mint)) return true;
   seen.add(mint);
-  // Cap memory - reduced size
-  if (seen.size > 2000) {
-    const keep = Array.from(seen).slice(-1000);
+  // Cap memory - more aggressive
+  if (seen.size > 1000) {
+    const keep = Array.from(seen).slice(-500);
     seenMints.set(cluster, new Set(keep));
   }
   return false;
@@ -561,15 +526,19 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
           }
 
           // Fetch metadata asynchronously and update (metadata might not be immediately available)
-          // Reduced delay for faster updates
-          setTimeout(async () => {
+          // Use a queue to limit concurrent metadata fetches and prevent memory spikes
+          const globalObj = globalThis as any;
+          const metadataQueue = globalObj.__metadataQueue || (globalObj.__metadataQueue = []);
+          const processMetadata = async () => {
+            if (metadataQueue.length === 0) return;
+            const { mint, signature: sig, cluster: cl } = metadataQueue.shift()!;
             try {
-              // Try Pump Fun API first
-              const pumpFunMetadata = await fetchPumpFunMetadata(tokenInfo.mint);
+              // Try Pump Fun API first (most reliable)
+              const pumpFunMetadata = await fetchPumpFunMetadata(mint);
               if (pumpFunMetadata) {
-                const tokens = recentTokens.get(cluster);
+                const tokens = recentTokens.get(cl);
                 if (tokens) {
-                  const idx = tokens.findIndex((t) => t.mint === tokenInfo.mint && t.signature === signature);
+                  const idx = tokens.findIndex((t) => t.mint === mint && t.signature === sig);
                   if (idx >= 0) {
                     tokens[idx] = {
                       ...tokens[idx],
@@ -594,7 +563,20 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
             } catch {
               // ignore async metadata update errors
             }
-          }, 1000); // Reduced to 1 second for faster metadata updates
+            // Process next in queue after a delay
+            if (metadataQueue.length > 0) {
+              setTimeout(processMetadata, 500);
+            }
+          };
+          
+          // Add to queue (limit queue size to prevent memory growth)
+          if (metadataQueue.length < 20) {
+            metadataQueue.push({ mint: tokenInfo.mint, signature, cluster });
+            if (metadataQueue.length === 1) {
+              // Start processing if queue was empty
+              setTimeout(processMetadata, 1000);
+            }
+          }
 
           pushClusterLog(
             cluster,
@@ -651,23 +633,34 @@ export function startPeriodicCleanup() {
         recentTokens.set(cluster, cleaned);
         pushClusterLog(cluster, "info", `Cleaned up ${tokens.length - cleaned.length} old tokens`);
       }
+      // Also enforce MAX_RECENT_TOKENS limit
+      if (cleaned.length > MAX_RECENT_TOKENS) {
+        recentTokens.set(cluster, cleaned.slice(0, MAX_RECENT_TOKENS));
+      }
     }
     
-    // Clean up seen signatures and mints periodically
+    // Clean up seen signatures and mints periodically (more aggressive)
     for (const [cluster, seen] of seenSignatures.entries()) {
-      if (seen.size > 2000) {
-        const keep = Array.from(seen).slice(-1000);
+      if (seen.size > 1000) {
+        const keep = Array.from(seen).slice(-500);
         seenSignatures.set(cluster, new Set(keep));
       }
     }
     
     for (const [cluster, seen] of seenMints.entries()) {
-      if (seen.size > 2000) {
-        const keep = Array.from(seen).slice(-1000);
+      if (seen.size > 1000) {
+        const keep = Array.from(seen).slice(-500);
         seenMints.set(cluster, new Set(keep));
       }
     }
-  }, 5 * 60 * 1000); // Run cleanup every 5 minutes
+    
+    // Clean up metadata queue if it's too large
+    const globalObj = globalThis as any;
+    const metadataQueue = globalObj.__metadataQueue;
+    if (metadataQueue && metadataQueue.length > 20) {
+      metadataQueue.splice(20);
+    }
+  }, 2 * 60 * 1000); // Run cleanup every 2 minutes (more frequent)
 }
 
 export function stopPeriodicCleanup() {

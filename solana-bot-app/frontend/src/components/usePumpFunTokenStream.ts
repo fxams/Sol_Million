@@ -23,7 +23,7 @@ export function usePumpFunTokenStream(opts: {
   cluster: "mainnet-beta" | "devnet";
   maxTokens?: number;
 }) {
-  const maxTokens = Math.max(50, Math.min(1000, opts.maxTokens ?? 200));
+  const maxTokens = Math.max(30, Math.min(500, opts.maxTokens ?? 100)); // Reduced from 200 to 100
   const [connected, setConnected] = useState(false);
   const [tokens, setTokens] = useState<PumpFunTokenInfo[]>([]);
   const esRef = useRef<EventSource | null>(null);
