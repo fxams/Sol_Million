@@ -26,7 +26,8 @@ type TokenDeploymentListener = (token: PumpFunTokenInfo) => void;
 
 const listeners = new Set<TokenDeploymentListener>();
 const recentTokens = new Map<Cluster, PumpFunTokenInfo[]>();
-const MAX_RECENT_TOKENS = 500;
+const MAX_RECENT_TOKENS = 100; // Reduced from 500 to save memory
+const TOKEN_CLEANUP_AGE_MS = 60 * 60 * 1000; // Clean up tokens older than 1 hour
 
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -304,30 +305,36 @@ async function deriveMetadataPDA(mint: PublicKey): Promise<PublicKey> {
   return metadataPDA;
 }
 
-// Fetch metadata from Pump Fun API
+// Fetch metadata from Pump Fun API with memory-efficient approach
 async function fetchPumpFunMetadata(mint: string): Promise<any | null> {
   try {
     // Pump Fun API endpoint
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    
     const response = await fetch(`https://frontend-api.pump.fun/coins/${mint}`, {
       headers: {
         "Accept": "application/json",
         "User-Agent": "Mozilla/5.0"
       },
-      signal: AbortSignal.timeout(5000)
+      signal: controller.signal
     });
+    
+    clearTimeout(timeoutId);
 
     if (!response.ok) return null;
 
     const data = await response.json();
     if (!data) return null;
 
+    // Only extract needed fields to minimize memory
     return {
       name: data.name,
       symbol: data.symbol,
       image: data.image_uri || data.image,
-      description: data.description,
+      description: data.description ? String(data.description).substring(0, 500) : undefined, // Limit description length
       website: data.website || data.website_url,
-      twitter: data.twitter || data.twitter_url || (data.twitter_handle ? `https://twitter.com/${data.twitter_handle.replace(/^@/, "")}` : undefined)
+      twitter: data.twitter || data.twitter_url || (data.twitter_handle ? `https://twitter.com/${String(data.twitter_handle).replace(/^@/, "")}` : undefined)
     };
   } catch {
     return null;
@@ -429,9 +436,9 @@ function markSeenSignature(cluster: Cluster, signature: string): boolean {
   const seen = seenSignatures.get(cluster)!;
   if (seen.has(signature)) return true;
   seen.add(signature);
-  // Cap memory
-  if (seen.size > 5000) {
-    const keep = Array.from(seen).slice(-3000);
+  // Cap memory - reduced size
+  if (seen.size > 2000) {
+    const keep = Array.from(seen).slice(-1000);
     seenSignatures.set(cluster, new Set(keep));
   }
   return false;
@@ -444,9 +451,9 @@ function markSeenMint(cluster: Cluster, mint: string): boolean {
   const seen = seenMints.get(cluster)!;
   if (seen.has(mint)) return true;
   seen.add(mint);
-  // Cap memory
-  if (seen.size > 10000) {
-    const keep = Array.from(seen).slice(-7000);
+  // Cap memory - reduced size
+  if (seen.size > 2000) {
+    const keep = Array.from(seen).slice(-1000);
     seenMints.set(cluster, new Set(keep));
   }
   return false;
@@ -458,7 +465,14 @@ export function subscribeTokenDeployments(listener: TokenDeploymentListener): ()
 }
 
 export function getRecentTokens(cluster: Cluster): PumpFunTokenInfo[] {
-  return recentTokens.get(cluster) ?? [];
+  const tokens = recentTokens.get(cluster) ?? [];
+  // Clean up old tokens when retrieving
+  const now = Date.now();
+  const cleaned = tokens.filter((t) => now - t.timestamp < TOKEN_CLEANUP_AGE_MS);
+  if (cleaned.length < tokens.length) {
+    recentTokens.set(cluster, cleaned);
+  }
+  return cleaned;
 }
 
 export async function ensureTokenMonitoring(cluster: Cluster) {
@@ -468,6 +482,9 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
   }
 
   if (wsConnections.has(cluster)) return;
+  
+  // Start periodic cleanup if not already started
+  startPeriodicCleanup();
 
   const wsUrl = getWsUrl(cluster);
   pushClusterLog(cluster, "info", `Starting Pump Fun token monitoring: ${wsUrl}`);
@@ -513,15 +530,26 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
             return;
           }
 
-          // Add to recent tokens
+          // Add to recent tokens with cleanup
           if (!recentTokens.has(cluster)) {
             recentTokens.set(cluster, []);
           }
           const clusterTokens = recentTokens.get(cluster)!;
-          clusterTokens.unshift(tokenInfo);
-          if (clusterTokens.length > MAX_RECENT_TOKENS) {
-            clusterTokens.pop();
+          
+          // Clean up old tokens first (older than 1 hour)
+          const now = Date.now();
+          const cleaned = clusterTokens.filter((t) => now - t.timestamp < TOKEN_CLEANUP_AGE_MS);
+          recentTokens.set(cluster, cleaned);
+          
+          // Add new token
+          cleaned.unshift(tokenInfo);
+          
+          // Cap at MAX_RECENT_TOKENS
+          if (cleaned.length > MAX_RECENT_TOKENS) {
+            cleaned.splice(MAX_RECENT_TOKENS);
           }
+          
+          recentTokens.set(cluster, cleaned);
 
           // Notify listeners immediately with basic info
           for (const listener of listeners) {
@@ -533,11 +561,9 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
           }
 
           // Fetch metadata asynchronously and update (metadata might not be immediately available)
-          setTimeout(async () => {
+          // Use a single timeout to avoid memory leaks
+          const timeoutId = setTimeout(async () => {
             try {
-              const mintPk = new PublicKey(tokenInfo.mint);
-              const connection = new Connection(getRpcUrl(cluster), "confirmed");
-              
               // Try Pump Fun API first
               const pumpFunMetadata = await fetchPumpFunMetadata(tokenInfo.mint);
               if (pumpFunMetadata) {
@@ -569,6 +595,9 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
               // ignore async metadata update errors
             }
           }, 3000); // Wait 3 seconds for metadata to be available on Pump Fun API
+          
+          // Store timeout ID for potential cleanup (though in practice these should complete quickly)
+          // Note: In a production environment, you'd want to track these and clear them on shutdown
 
           pushClusterLog(
             cluster,
@@ -603,5 +632,50 @@ export function stopTokenMonitoring(cluster: Cluster) {
       // ignore
     }
     wsConnections.delete(cluster);
+  }
+  
+  // Clean up memory when stopping
+  seenSignatures.delete(cluster);
+  seenMints.delete(cluster);
+  recentTokens.delete(cluster);
+}
+
+// Periodic cleanup to prevent memory leaks
+let cleanupInterval: NodeJS.Timeout | null = null;
+
+export function startPeriodicCleanup() {
+  if (cleanupInterval) return;
+  
+  cleanupInterval = setInterval(() => {
+    const now = Date.now();
+    for (const [cluster, tokens] of recentTokens.entries()) {
+      const cleaned = tokens.filter((t) => now - t.timestamp < TOKEN_CLEANUP_AGE_MS);
+      if (cleaned.length < tokens.length) {
+        recentTokens.set(cluster, cleaned);
+        pushClusterLog(cluster, "info", `Cleaned up ${tokens.length - cleaned.length} old tokens`);
+      }
+    }
+    
+    // Clean up seen signatures and mints periodically
+    for (const [cluster, seen] of seenSignatures.entries()) {
+      if (seen.size > 2000) {
+        const keep = Array.from(seen).slice(-1000);
+        seenSignatures.set(cluster, new Set(keep));
+      }
+    }
+    
+    for (const [cluster, seen] of seenMints.entries()) {
+      if (seen.size > 2000) {
+        const keep = Array.from(seen).slice(-1000);
+        seenMints.set(cluster, new Set(keep));
+      }
+    }
+  }, 5 * 60 * 1000); // Run cleanup every 5 minutes
+}
+
+export function stopPeriodicCleanup() {
+  if (cleanupInterval) {
+    clearInterval(cleanupInterval);
+    cleanupInterval = null;
   }
 }
