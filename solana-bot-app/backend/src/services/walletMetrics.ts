@@ -15,6 +15,7 @@ export type WalletMetrics = {
 
 type CacheEntry = { metrics: WalletMetrics; fetchedAtMs: number };
 const cache = new Map<string, CacheEntry>();
+const MAX_CACHE_SIZE = 200; // Cap cache to prevent unbounded growth
 
 function cacheKey(cluster: Cluster, owner: string) {
   return `${cluster}:${owner}`;
@@ -105,6 +106,15 @@ export async function getWalletMetricsBatch(opts: {
     cache.set(cacheKey(opts.cluster, owner), { metrics, fetchedAtMs: now });
     return metrics;
   });
+
+  // Clean up cache if it grows too large
+  if (cache.size > MAX_CACHE_SIZE) {
+    const entries = Array.from(cache.entries());
+    entries.sort((a, b) => b[1].fetchedAtMs - a[1].fetchedAtMs); // Sort by most recent
+    const keep = entries.slice(0, MAX_CACHE_SIZE);
+    cache.clear();
+    for (const [k, v] of keep) cache.set(k, v);
+  }
 
   const merged = [...cached, ...fresh];
   merged.sort((a, b) => owners.indexOf(a.owner) - owners.indexOf(b.owner));

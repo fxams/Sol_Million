@@ -140,8 +140,8 @@ export type ClusterRuntime = {
   sessions: Map<string, WalletSession>; // owner -> session
 };
 
-const MAX_LOGS = 500;
-const MAX_VIZ_EVENTS = 250;
+const MAX_LOGS = 200; // Reduced from 500 to save memory
+const MAX_VIZ_EVENTS = 100; // Reduced from 250 to save memory
 
 const vizListeners = new Set<(evt: VizEvent) => void>();
 let vizSeq = 0;

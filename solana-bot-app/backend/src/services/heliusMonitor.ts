@@ -350,10 +350,10 @@ function markSeenSignature(cluster: Cluster, signature: string) {
   if (!seen) return false;
   if (seen.has(signature)) return true;
   seen.add(signature);
-  // cap memory
-  if (seen.size > 3000) {
+  // cap memory - reduced size
+  if (seen.size > 2000) {
     // remove oldest-ish by recreating
-    const keep = Array.from(seen).slice(-2000);
+    const keep = Array.from(seen).slice(-1000);
     runtime.seenSignatures = new Set(keep);
   }
   return false;
@@ -493,8 +493,17 @@ export async function ensureClusterSubscription(cluster: Cluster) {
 
           const now = Date.now();
 
-          // Per-session momentum tracking
+          // Per-session momentum tracking (with size limit)
           const mintStats: Map<string, any> = (s as any)._autoMintStats ?? new Map();
+          // Cap mint stats to prevent memory growth
+          if (mintStats.size > 100) {
+            // Keep only the most recent 50 mints
+            const entries = Array.from(mintStats.entries());
+            entries.sort((a, b) => (b[1]?.firstSeenMs ?? 0) - (a[1]?.firstSeenMs ?? 0));
+            const keep = entries.slice(0, 50);
+            mintStats.clear();
+            for (const [k, v] of keep) mintStats.set(k, v);
+          }
           (s as any)._autoMintStats = mintStats;
 
           let st = mintStats.get(mint);
@@ -516,8 +525,18 @@ export async function ensureClusterSubscription(cluster: Cluster) {
             st.firstSeenMs = now;
             st.createdAtMs = now;
             st.count = 0;
-            st.payers = new Set<string>();
+            st.payers.clear(); // Clear instead of creating new Set
             st.safety = null;
+          }
+          
+          // Clean up old mint stats periodically (older than 5 minutes)
+          if (mintStats.size > 0 && Math.random() < 0.1) { // 10% chance per signal
+            const fiveMinutesAgo = now - 5 * 60 * 1000;
+            for (const [m, stat] of mintStats.entries()) {
+              if (stat.firstSeenMs < fiveMinutesAgo && now - stat.firstSeenMs > cfg.autoSnipe.windowSec * 1000 * 2) {
+                mintStats.delete(m);
+              }
+            }
           }
 
           const createdAtMs = Number(st.createdAtMs ?? st.firstSeenMs ?? now);
@@ -637,6 +656,35 @@ export async function stopWalletSession(cluster: Cluster, owner: string) {
   session.config = null;
   session.pendingAction = null;
   session.epoch += 1;
+  
+  // Clean up session-specific memory
+  delete (session as any)._autoSnipeStats;
+  delete (session as any)._autoMintStats;
+  delete (session as any)._matchedMints;
+  delete (session as any)._lastVolumeActionMs;
+  delete (session as any)._lastHeartbeatMs_raydium;
+  delete (session as any)._lastHeartbeatMs_pumpfun;
+  delete (session as any)._lastEmptySnipeWarnMs;
+  delete (session as any)._lastVolumeRoute;
+  
+  // Clean up old bundles (keep only last 20)
+  const bundles = Array.from(session.bundles.values());
+  if (bundles.length > 20) {
+    bundles.sort((a, b) => b.createdAtMs - a.createdAtMs);
+    const keep = bundles.slice(0, 20);
+    session.bundles.clear();
+    for (const b of keep) session.bundles.set(b.bundleId, b);
+  }
+  
+  // Clean up old prepared bundles (keep only last 10)
+  const prepared = Array.from(session.preparedBundles.values());
+  if (prepared.length > 10) {
+    prepared.sort((a, b) => b.createdAtMs - a.createdAtMs);
+    const keep = prepared.slice(0, 10);
+    session.preparedBundles.clear();
+    for (const b of keep) session.preparedBundles.set(b.bundleId, b);
+  }
+  
   pushSessionLog(cluster, owner, "info", "Session stopped");
 
   stopVolumeLoop(cluster, owner);
