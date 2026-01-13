@@ -2,6 +2,7 @@ import express from "express";
 import cors from "cors";
 import apiRouter from "./routes/api.js";
 import { env } from "./utils/env.js";
+import { ensureTokenMonitoring } from "./services/pumpfunTokenMonitor.js";
 
 const app = express();
 
@@ -31,5 +32,13 @@ app.listen(env.port, () => {
   console.log(`Backend listening on http://localhost:${env.port}`);
   // eslint-disable-next-line no-console
   console.log(`PUMPFUN_PROGRAM_ID set: ${Boolean(env.pumpfunProgramId)}${env.pumpfunProgramId ? ` (${env.pumpfunProgramId})` : ""}`);
+  
+  // Start token monitoring for mainnet (can be started on-demand via API too)
+  if (env.pumpfunProgramId) {
+    ensureTokenMonitoring("mainnet-beta").catch((e) => {
+      // eslint-disable-next-line no-console
+      console.error("Failed to start token monitoring:", e);
+    });
+  }
 });
 

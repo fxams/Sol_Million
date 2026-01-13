@@ -23,6 +23,7 @@ import {
 import { AppFlowViz } from "./AppFlowViz";
 import { InsightsDashboard } from "./InsightsDashboard";
 import { useVizStream } from "./useVizStream";
+import { PumpFunTokenMonitor } from "./PumpFunTokenMonitor";
 
 type BotMode = "snipe" | "volume";
 type PumpFunPhase = "pre" | "post";
@@ -258,7 +259,7 @@ export function Dashboard() {
   const { connection } = useConnection();
   const wallet = useWallet();
 
-  const [activeTab, setActiveTab] = useState<"bot" | "insights" | "fleet">("bot");
+  const [activeTab, setActiveTab] = useState<"bot" | "insights" | "fleet" | "tokens">("bot");
 
   const [cluster, setCluster] = useState<"mainnet-beta" | "devnet">(
     ((process.env.NEXT_PUBLIC_CLUSTER ?? "mainnet-beta") as "mainnet-beta" | "devnet") ||
@@ -1032,6 +1033,19 @@ export function Dashboard() {
               </span>
               Wallet Fleet
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab("tokens")}
+              className={clsx(
+                "mt-1 flex w-full items-center gap-2 rounded-lg px-3 py-2 text-sm",
+                activeTab === "tokens" ? "bg-slate-900 text-slate-100" : "text-slate-300 hover:bg-slate-900/60"
+              )}
+            >
+              <span className="inline-flex h-6 w-6 items-center justify-center rounded-md border border-slate-800 bg-slate-950 text-xs">
+                T
+              </span>
+              Pump Fun Tokens
+            </button>
           </nav>
           <div className="mt-auto px-4 py-4 text-xs text-slate-500">
             <div className="flex items-center justify-between">
@@ -1053,14 +1067,18 @@ export function Dashboard() {
                         ? "Wallet fleet workspace"
                         : activeTab === "insights"
                           ? "Insights workspace"
-                          : "Bot workspace"}
+                          : activeTab === "tokens"
+                            ? "Pump Fun Token Monitor"
+                            : "Bot workspace"}
                     </div>
                     <div className="text-xs text-slate-400">
                       {activeTab === "fleet"
                         ? "Manage wallets, funding, and metrics"
                         : activeTab === "insights"
                           ? "High-signal real-time dashboard (heat, risk, activity)"
-                          : "Configure, monitor, and execute trades"}
+                          : activeTab === "tokens"
+                            ? "Real-time monitoring of all Pump Fun token deployments"
+                            : "Configure, monitor, and execute trades"}
                     </div>
                   </div>
                   {/* Mobile nav */}
@@ -1073,6 +1091,9 @@ export function Dashboard() {
                     </TabButton>
                     <TabButton active={activeTab === "fleet"} onClick={() => setActiveTab("fleet")}>
                       Fleet
+                    </TabButton>
+                    <TabButton active={activeTab === "tokens"} onClick={() => setActiveTab("tokens")}>
+                      Tokens
                     </TabButton>
                   </div>
                 </div>
@@ -1137,6 +1158,10 @@ export function Dashboard() {
               pendingAction={Boolean(pendingAction)}
               sessionsCount={(sessions ?? []).length}
             />
+          </div>
+        ) : activeTab === "tokens" ? (
+          <div className="mt-4">
+            <PumpFunTokenMonitor backendBaseUrl={backendBaseUrl} cluster={cluster} />
           </div>
         ) : activeTab === "bot" ? (
         <>

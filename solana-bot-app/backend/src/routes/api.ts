@@ -20,6 +20,12 @@ import { buildUnsignedBuyLikeTxBase64, buildUnsignedSellLikeTxBase64 } from "../
 import { base64ToBytes, bytesToBase58 } from "../utils/encoding.js";
 import { jito } from "../services/jito.js";
 import { getWalletMetricsBatch } from "../services/walletMetrics.js";
+import {
+  ensureTokenMonitoring,
+  getRecentTokens,
+  subscribeTokenDeployments,
+  type PumpFunTokenInfo
+} from "../services/pumpfunTokenMonitor.js";
 
 const router = Router();
 
@@ -513,6 +519,53 @@ router.get("/jito-tip-accounts", async (req, res) => {
   } catch (e: any) {
     return res.status(500).json({ error: e?.message ?? "Failed to fetch tip accounts" });
   }
+});
+
+router.get("/pumpfun-tokens/stream", (req, res) => {
+  const cluster = clusterSchema.catch("mainnet-beta").parse(req.query.cluster);
+
+  res.status(200);
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+
+  const write = (eventName: string | null, data: unknown) => {
+    if (eventName) res.write(`event: ${eventName}\n`);
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  write("hello", { ts: Date.now(), cluster });
+
+  // Start monitoring if not already started
+  ensureTokenMonitoring(cluster).catch(() => {});
+
+  // Send recent tokens backlog
+  const recent = getRecentTokens(cluster);
+  for (const token of recent.slice(0, 50)) {
+    write(null, token);
+  }
+
+  // Subscribe to new token deployments
+  const unsubscribe = subscribeTokenDeployments((token) => {
+    write(null, token);
+  });
+
+  const keepAlive = setInterval(() => {
+    write("ping", { ts: Date.now() });
+  }, 15_000);
+
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    unsubscribe();
+  });
+});
+
+router.get("/pumpfun-tokens/recent", (req, res) => {
+  const cluster = clusterSchema.catch("mainnet-beta").parse(req.query.cluster);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+  const tokens = getRecentTokens(cluster).slice(0, limit);
+  return res.json({ ok: true, cluster, tokens, count: tokens.length });
 });
 
 export default router;
