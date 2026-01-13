@@ -61,9 +61,17 @@ function pumpFunUrl(mint: string) {
 }
 
 function TokenCard({ token, cluster, isNew }: { token: any; cluster: Cluster; isNew: boolean }) {
-  const displayName = token.name || formatAddress(token.mint, 4);
-  const displaySymbol = token.symbol || "N/A";
-  const imageUrl = token.imageUri || `https://api.dicebear.com/7.x/shapes/svg?seed=${token.mint}`;
+  const displayName = token.name || token.symbol || formatAddress(token.mint, 4);
+  const displaySymbol = token.symbol || token.name || "N/A";
+  
+  // Handle image URL - support both direct URLs and IPFS
+  let imageUrl = token.imageUri;
+  if (imageUrl && imageUrl.startsWith("ipfs://")) {
+    imageUrl = `https://ipfs.io/ipfs/${imageUrl.replace("ipfs://", "")}`;
+  }
+  if (!imageUrl || !imageUrl.startsWith("http")) {
+    imageUrl = `https://api.dicebear.com/7.x/shapes/svg?seed=${token.mint}`;
+  }
 
   return (
     <div
@@ -80,9 +88,12 @@ function TokenCard({ token, cluster, isNew }: { token: any; cluster: Cluster; is
           src={imageUrl}
           alt={displayName}
           className="h-full w-full object-cover"
+          loading="lazy"
           onError={(e) => {
             const target = e.target as HTMLImageElement;
-            target.src = `https://api.dicebear.com/7.x/shapes/svg?seed=${token.mint}`;
+            if (target.src !== `https://api.dicebear.com/7.x/shapes/svg?seed=${token.mint}`) {
+              target.src = `https://api.dicebear.com/7.x/shapes/svg?seed=${token.mint}`;
+            }
           }}
         />
         {isNew && (

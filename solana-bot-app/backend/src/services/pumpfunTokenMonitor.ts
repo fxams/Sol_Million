@@ -173,13 +173,21 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
 
   const mint = Array.from(mints)[0];
   
-  // More strict: must be a new mint AND look like a creation
+  // Check if this is a new mint (appears in post but not pre balances)
   const isNewMint = isMintNewInTx(tx, mint);
-  const hasCreateLogs = isCreateLikePumpfunLogs(opts.logs);
-  const isCreationTx = isTokenCreationTx(tx, mint);
   
-  // Require both: new mint AND (create logs OR creation transaction pattern)
-  if (!isNewMint || (!hasCreateLogs && !isCreationTx)) return null;
+  // If it's a new mint, it's likely a token creation
+  // We'll be less strict to catch more tokens, but still validate it's new
+  if (!isNewMint) {
+    // Not a new mint, skip
+    return null;
+  }
+  
+  // Additional validation: check if it has create-like logs (optional but preferred)
+  const hasCreateLogs = isCreateLikePumpfunLogs(opts.logs);
+  
+  // If no create logs, still allow if it's a new mint (might be created via different method)
+  // This helps catch tokens that might not have the exact log pattern
 
   // Extract deployer (first signer)
   const keys = getStaticAccountKeysFromTx(tx);
@@ -221,31 +229,49 @@ async function extractTokenInfo(opts: { cluster: Cluster; signature: string; log
       // ignore
     }
 
-    // Fetch Metaplex metadata
+    // Fetch metadata from multiple sources
     try {
-      const metadata = await fetchMetaplexMetadata(connection, mintPk);
-      if (metadata) {
-        name = metadata.name;
-        symbol = metadata.symbol;
-        imageUri = metadata.image;
-        metadataUri = metadata.uri;
-        description = metadata.description;
-        if (metadata.external_url) website = metadata.external_url;
-        if (metadata.twitter) twitter = metadata.twitter;
-        if (metadata.attributes) {
-          // Some tokens store links in attributes
-          for (const attr of metadata.attributes) {
-            if (attr.trait_type === "website" && typeof attr.value === "string") {
-              website = attr.value;
-            }
-            if (attr.trait_type === "twitter" && typeof attr.value === "string") {
-              twitter = attr.value;
+      // First try Pump Fun API (most reliable for Pump Fun tokens)
+      const pumpFunMetadata = await fetchPumpFunMetadata(mint);
+      if (pumpFunMetadata) {
+        name = pumpFunMetadata.name || name;
+        symbol = pumpFunMetadata.symbol || symbol;
+        imageUri = pumpFunMetadata.image || imageUri;
+        website = pumpFunMetadata.website || website;
+        twitter = pumpFunMetadata.twitter || twitter;
+        description = pumpFunMetadata.description || description;
+      }
+    } catch (e: any) {
+      pushClusterLog(opts.cluster, "warn", `Pump Fun API fetch failed for ${mint.slice(0, 8)}: ${e?.message}`);
+    }
+
+    // Fallback to Metaplex metadata
+    if (!name || !imageUri) {
+      try {
+        const metadata = await fetchMetaplexMetadata(connection, mintPk);
+        if (metadata) {
+          name = name || metadata.name;
+          symbol = symbol || metadata.symbol;
+          imageUri = imageUri || metadata.image;
+          metadataUri = metadataUri || metadata.uri;
+          description = description || metadata.description;
+          if (!website && metadata.external_url) website = metadata.external_url;
+          if (!twitter && metadata.twitter) twitter = metadata.twitter;
+          if (metadata.attributes) {
+            // Some tokens store links in attributes
+            for (const attr of metadata.attributes) {
+              if (attr.trait_type === "website" && typeof attr.value === "string" && !website) {
+                website = attr.value;
+              }
+              if (attr.trait_type === "twitter" && typeof attr.value === "string" && !twitter) {
+                twitter = attr.value;
+              }
             }
           }
         }
+      } catch (e: any) {
+        pushClusterLog(opts.cluster, "warn", `Metaplex metadata fetch failed for ${mint.slice(0, 8)}: ${e?.message}`);
       }
-    } catch {
-      // ignore metadata fetch errors
     }
   } catch {
     // ignore metadata errors
@@ -276,6 +302,36 @@ async function deriveMetadataPDA(mint: PublicKey): Promise<PublicKey> {
     METADATA_PROGRAM_ID
   );
   return metadataPDA;
+}
+
+// Fetch metadata from Pump Fun API
+async function fetchPumpFunMetadata(mint: string): Promise<any | null> {
+  try {
+    // Pump Fun API endpoint
+    const response = await fetch(`https://frontend-api.pump.fun/coins/${mint}`, {
+      headers: {
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0"
+      },
+      signal: AbortSignal.timeout(5000)
+    });
+
+    if (!response.ok) return null;
+
+    const data = await response.json();
+    if (!data) return null;
+
+    return {
+      name: data.name,
+      symbol: data.symbol,
+      image: data.image_uri || data.image,
+      description: data.description,
+      website: data.website || data.website_url,
+      twitter: data.twitter || data.twitter_url || (data.twitter_handle ? `https://twitter.com/${data.twitter_handle.replace(/^@/, "")}` : undefined)
+    };
+  } catch {
+    return null;
+  }
 }
 
 // Fetch Metaplex metadata
@@ -325,23 +381,34 @@ async function fetchMetaplexMetadata(connection: Connection, mint: PublicKey): P
     const uri = uriBytes.toString("utf8").replace(/\0/g, "");
 
     // Fetch JSON metadata from URI
-    if (uri && uri.startsWith("http")) {
+    if (uri && (uri.startsWith("http") || uri.startsWith("https"))) {
       try {
-        const response = await fetch(uri, { signal: AbortSignal.timeout(5000) });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+        const response = await fetch(uri, { 
+          signal: controller.signal,
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0"
+          }
+        });
+        clearTimeout(timeoutId);
+        
         if (response.ok) {
           const json = await response.json();
           return {
             name: json.name || name,
             symbol: json.symbol || symbol,
-            image: json.image,
+            image: json.image || json.image_uri,
             description: json.description,
-            external_url: json.external_url,
-            twitter: json.twitter || json.twitter_url,
+            external_url: json.external_url || json.website,
+            twitter: json.twitter || json.twitter_url || (json.twitter_handle ? `https://twitter.com/${String(json.twitter_handle).replace(/^@/, "")}` : undefined),
             uri
           };
         }
-      } catch {
-        // ignore fetch errors
+      } catch (e: any) {
+        // Log but don't fail - metadata URI fetch is optional
+        // console.log(`Metadata URI fetch failed: ${e?.message}`);
       }
     }
 
@@ -456,7 +523,7 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
             clusterTokens.pop();
           }
 
-          // Notify listeners
+          // Notify listeners immediately with basic info
           for (const listener of listeners) {
             try {
               listener(tokenInfo);
@@ -465,7 +532,49 @@ export async function ensureTokenMonitoring(cluster: Cluster) {
             }
           }
 
-          pushClusterLog(cluster, "info", `New Pump Fun token: ${tokenInfo.mint.slice(0, 8)}... (${signature.slice(0, 8)}...)`);
+          // Fetch metadata asynchronously and update (metadata might not be immediately available)
+          setTimeout(async () => {
+            try {
+              const mintPk = new PublicKey(tokenInfo.mint);
+              const connection = new Connection(getRpcUrl(cluster), "confirmed");
+              
+              // Try Pump Fun API first
+              const pumpFunMetadata = await fetchPumpFunMetadata(tokenInfo.mint);
+              if (pumpFunMetadata) {
+                const tokens = recentTokens.get(cluster);
+                if (tokens) {
+                  const idx = tokens.findIndex((t) => t.mint === tokenInfo.mint && t.signature === signature);
+                  if (idx >= 0) {
+                    tokens[idx] = {
+                      ...tokens[idx],
+                      name: pumpFunMetadata.name || tokens[idx].name,
+                      symbol: pumpFunMetadata.symbol || tokens[idx].symbol,
+                      imageUri: pumpFunMetadata.image || tokens[idx].imageUri,
+                      website: pumpFunMetadata.website || tokens[idx].website,
+                      twitter: pumpFunMetadata.twitter || tokens[idx].twitter,
+                      description: pumpFunMetadata.description || tokens[idx].description
+                    };
+                    // Notify listeners with updated metadata
+                    for (const listener of listeners) {
+                      try {
+                        listener(tokens[idx]);
+                      } catch {
+                        // ignore listener errors
+                      }
+                    }
+                  }
+                }
+              }
+            } catch {
+              // ignore async metadata update errors
+            }
+          }, 3000); // Wait 3 seconds for metadata to be available on Pump Fun API
+
+          pushClusterLog(
+            cluster,
+            "info",
+            `New Pump Fun token: ${tokenInfo.name || tokenInfo.mint.slice(0, 8)}... (${signature.slice(0, 8)}...)`
+          );
         } catch (e: any) {
           pushClusterLog(cluster, "warn", `Failed to extract token info: ${e?.message ?? String(e)}`);
         }
